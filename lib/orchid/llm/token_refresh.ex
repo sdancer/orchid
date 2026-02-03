@@ -67,10 +67,11 @@ defmodule Orchid.LLM.TokenRefresh do
   defp save_tokens(new_tokens) do
     config_path = get_config_path()
 
-    config = case File.read(config_path) do
-      {:ok, content} -> Jason.decode!(content)
-      _ -> %{}
-    end
+    config =
+      case File.read(config_path) do
+        {:ok, content} -> Jason.decode!(content)
+        _ -> %{}
+      end
 
     config = Map.put(config, "claudeAiOauth", new_tokens)
 
@@ -105,11 +106,12 @@ defmodule Orchid.LLM.TokenRefresh do
 
   # Perform the actual refresh request
   defp do_refresh(refresh_token) do
-    body = URI.encode_query(%{
-      "grant_type" => "refresh_token",
-      "refresh_token" => refresh_token,
-      "client_id" => @client_id
-    })
+    body =
+      URI.encode_query(%{
+        "grant_type" => "refresh_token",
+        "refresh_token" => refresh_token,
+        "client_id" => @client_id
+      })
 
     headers = [
       {"content-type", "application/x-www-form-urlencoded"}
@@ -120,11 +122,12 @@ defmodule Orchid.LLM.TokenRefresh do
         new_tokens = %{
           "accessToken" => response["access_token"],
           "refreshToken" => response["refresh_token"],
-          "expiresAt" => System.system_time(:millisecond) + (response["expires_in"] * 1000),
+          "expiresAt" => System.system_time(:millisecond) + response["expires_in"] * 1000,
           "scopes" => String.split(response["scope"] || "", " "),
           "subscriptionType" => response["subscription_type"],
           "rateLimitTier" => response["rate_limit_tier"]
         }
+
         Logger.info("[TokenRefresh] Token refreshed successfully")
         {:ok, new_tokens}
 

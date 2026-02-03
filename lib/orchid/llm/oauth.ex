@@ -27,16 +27,17 @@ defmodule Orchid.LLM.OAuth do
       body = build_request_body(config, context, false)
 
       case Req.post(@api_url,
-        json: body,
-        headers: headers(token),
-        receive_timeout: 120_000
-      ) do
+             json: body,
+             headers: headers(token),
+             receive_timeout: 120_000
+           ) do
         {:ok, %{status: 200, body: response}} ->
           parse_response(response)
 
         {:ok, %{status: 401, body: _body}} when not retried? ->
           # Token expired mid-request, force refresh and retry
           Logger.info("Got 401, forcing token refresh...")
+
           case Orchid.LLM.TokenRefresh.force_refresh() do
             {:ok, _} -> do_chat(config, context, false, true)
             {:error, reason} -> {:error, {:refresh_failed, reason}}
@@ -64,9 +65,10 @@ defmodule Orchid.LLM.OAuth do
       body = build_request_body(config, context, true)
 
       # Use Agent to track streaming state
-      {:ok, acc_pid} = Agent.start_link(fn ->
-        %{content: "", tool_calls: [], current_tool: nil, input_json: ""}
-      end)
+      {:ok, acc_pid} =
+        Agent.start_link(fn ->
+          %{content: "", tool_calls: [], current_tool: nil, input_json: ""}
+        end)
 
       result =
         Req.post(@api_url,
@@ -77,6 +79,7 @@ defmodule Orchid.LLM.OAuth do
             Agent.update(acc_pid, fn acc ->
               process_sse_chunk(chunk, acc, callback)
             end)
+
             {:cont, {req, resp}}
           end
         )
@@ -91,6 +94,7 @@ defmodule Orchid.LLM.OAuth do
 
         {:ok, %{status: 401}} when not retried? ->
           Logger.info("Got 401 on stream, forcing token refresh...")
+
           case Orchid.LLM.TokenRefresh.force_refresh() do
             {:ok, _} -> do_chat_stream(config, context, callback, true)
             {:error, reason} -> {:error, {:refresh_failed, reason}}
@@ -134,18 +138,24 @@ defmodule Orchid.LLM.OAuth do
     # Custom instructions get prepended to first user message
     system_text = @default_system
 
-    messages = case context[:system] do
-      nil -> messages
-      "" -> messages
-      custom ->
-        # Inject custom instructions into first user message
-        case messages do
-          [first | rest] ->
-            [inject_instructions(first, custom) | rest]
-          [] ->
-            messages
-        end
-    end
+    messages =
+      case context[:system] do
+        nil ->
+          messages
+
+        "" ->
+          messages
+
+        custom ->
+          # Inject custom instructions into first user message
+          case messages do
+            [first | rest] ->
+              [inject_instructions(first, custom) | rest]
+
+            [] ->
+              messages
+          end
+      end
 
     tools = format_tools()
 
@@ -181,7 +191,10 @@ defmodule Orchid.LLM.OAuth do
     Enum.map(messages, fn msg ->
       case msg.role do
         :user ->
-          %{role: "user", content: [%{type: "text", text: msg.content, cache_control: %{type: "ephemeral"}}]}
+          %{
+            role: "user",
+            content: [%{type: "text", text: msg.content, cache_control: %{type: "ephemeral"}}]
+          }
 
         :assistant ->
           format_assistant_message(msg)
@@ -202,23 +215,26 @@ defmodule Orchid.LLM.OAuth do
   end
 
   defp format_assistant_message(msg) do
-    content = cond do
-      msg[:tool_calls] && msg.tool_calls != [] ->
-        text_block = if msg.content && msg.content != "" do
-          [%{type: "text", text: msg.content}]
-        else
-          []
-        end
+    content =
+      cond do
+        msg[:tool_calls] && msg.tool_calls != [] ->
+          text_block =
+            if msg.content && msg.content != "" do
+              [%{type: "text", text: msg.content}]
+            else
+              []
+            end
 
-        tool_blocks = Enum.map(msg.tool_calls, fn tc ->
-          %{type: "tool_use", id: tc.id, name: tc.name, input: tc.arguments}
-        end)
+          tool_blocks =
+            Enum.map(msg.tool_calls, fn tc ->
+              %{type: "tool_use", id: tc.id, name: tc.name, input: tc.arguments}
+            end)
 
-        text_block ++ tool_blocks
+          text_block ++ tool_blocks
 
-      true ->
-        [%{type: "text", text: msg.content || ""}]
-    end
+        true ->
+          [%{type: "text", text: msg.content || ""}]
+      end
 
     %{role: "assistant", content: content}
   end
@@ -226,16 +242,18 @@ defmodule Orchid.LLM.OAuth do
   defp parse_response(response) do
     content_blocks = response["content"] || []
 
-    text_content = content_blocks
-    |> Enum.filter(&(&1["type"] == "text"))
-    |> Enum.map(&(&1["text"]))
-    |> Enum.join("")
+    text_content =
+      content_blocks
+      |> Enum.filter(&(&1["type"] == "text"))
+      |> Enum.map(& &1["text"])
+      |> Enum.join("")
 
-    tool_calls = content_blocks
-    |> Enum.filter(&(&1["type"] == "tool_use"))
-    |> Enum.map(fn block ->
-      %{id: block["id"], name: block["name"], arguments: block["input"]}
-    end)
+    tool_calls =
+      content_blocks
+      |> Enum.filter(&(&1["type"] == "tool_use"))
+      |> Enum.map(fn block ->
+        %{id: block["id"], name: block["name"], arguments: block["input"]}
+      end)
 
     tool_calls = if tool_calls == [], do: nil, else: tool_calls
     {:ok, %{content: text_content, tool_calls: tool_calls}}
@@ -248,6 +266,7 @@ defmodule Orchid.LLM.OAuth do
       cond do
         String.starts_with?(line, "data: ") ->
           data = String.trim_leading(line, "data: ")
+
           if data != "[DONE]" do
             case Jason.decode(data) do
               {:ok, event} -> handle_sse_event(event, acc, callback)
@@ -267,15 +286,22 @@ defmodule Orchid.LLM.OAuth do
     case event["type"] do
       "content_block_start" ->
         block = event["content_block"]
+
         case block["type"] do
           "tool_use" ->
-            %{acc | current_tool: %{id: block["id"], name: block["name"], arguments: %{}}, input_json: ""}
+            %{
+              acc
+              | current_tool: %{id: block["id"], name: block["name"], arguments: %{}},
+                input_json: ""
+            }
+
           _ ->
             acc
         end
 
       "content_block_delta" ->
         delta = event["delta"]
+
         case delta["type"] do
           "text_delta" ->
             text = delta["text"] || ""
@@ -293,10 +319,11 @@ defmodule Orchid.LLM.OAuth do
       "content_block_stop" ->
         if acc.current_tool do
           # Parse accumulated JSON
-          arguments = case Jason.decode(acc.input_json) do
-            {:ok, parsed} -> parsed
-            _ -> %{}
-          end
+          arguments =
+            case Jason.decode(acc.input_json) do
+              {:ok, parsed} -> parsed
+              _ -> %{}
+            end
 
           tool = %{acc.current_tool | arguments: arguments}
           %{acc | tool_calls: acc.tool_calls ++ [tool], current_tool: nil, input_json: ""}

@@ -38,12 +38,13 @@ defmodule Orchid.Tools.Search do
     objects = Object.list()
 
     # Filter by type if specified
-    objects = if args["type"] do
-      type = String.to_existing_atom(args["type"])
-      Enum.filter(objects, fn obj -> obj.type == type end)
-    else
-      objects
-    end
+    objects =
+      if args["type"] do
+        type = String.to_existing_atom(args["type"])
+        Enum.filter(objects, fn obj -> obj.type == type end)
+      else
+        objects
+      end
 
     # Search for pattern
     use_regex = args["regex"] == true
@@ -52,29 +53,34 @@ defmodule Orchid.Tools.Search do
     if matches == [] do
       {:ok, "No matches found for: #{pattern}"}
     else
-      result = matches
-      |> Enum.map(fn {obj, line_matches} ->
-        header = "=== #{obj.name} (#{obj.id}) ==="
-        lines = Enum.map(line_matches, fn {line_num, line} ->
-          "  #{line_num}: #{String.trim(line)}"
+      result =
+        matches
+        |> Enum.map(fn {obj, line_matches} ->
+          header = "=== #{obj.name} (#{obj.id}) ==="
+
+          lines =
+            Enum.map(line_matches, fn {line_num, line} ->
+              "  #{line_num}: #{String.trim(line)}"
+            end)
+
+          [header | lines] |> Enum.join("\n")
         end)
-        [header | lines] |> Enum.join("\n")
-      end)
-      |> Enum.join("\n\n")
+        |> Enum.join("\n\n")
 
       {:ok, result}
     end
   end
 
   defp search_objects(objects, pattern, use_regex) do
-    regex = if use_regex do
-      case Regex.compile(pattern) do
-        {:ok, r} -> r
-        _ -> nil
+    regex =
+      if use_regex do
+        case Regex.compile(pattern) do
+          {:ok, r} -> r
+          _ -> nil
+        end
+      else
+        nil
       end
-    else
-      nil
-    end
 
     objects
     |> Enum.map(fn obj -> {obj, find_matches(obj.content, pattern, regex)} end)

@@ -21,10 +21,10 @@ defmodule Orchid.LLM.Anthropic do
     body = build_request_body(config, context)
 
     case Req.post(@api_url,
-      json: body,
-      headers: headers(api_key),
-      receive_timeout: 120_000
-    ) do
+           json: body,
+           headers: headers(api_key),
+           receive_timeout: 120_000
+         ) do
       {:ok, %{status: 200, body: response}} ->
         parse_response(response)
 
@@ -54,14 +54,16 @@ defmodule Orchid.LLM.Anthropic do
     initial_acc = %{content: "", tool_calls: [], current_tool: nil}
 
     case Req.post(@api_url,
-      json: body,
-      headers: headers(api_key),
-      receive_timeout: 120_000,
-      into: {initial_acc, fn {:data, chunk}, acc ->
-        {new_acc, _} = process_stream_chunk(chunk, acc, callback)
-        {:cont, new_acc}
-      end}
-    ) do
+           json: body,
+           headers: headers(api_key),
+           receive_timeout: 120_000,
+           into:
+             {initial_acc,
+              fn {:data, chunk}, acc ->
+                {new_acc, _} = process_stream_chunk(chunk, acc, callback)
+                {:cont, new_acc}
+              end}
+         ) do
       {:ok, %{status: 200, body: {final_acc, _}}} ->
         tool_calls = if final_acc.tool_calls == [], do: nil, else: final_acc.tool_calls
         {:ok, %{content: final_acc.content, tool_calls: tool_calls}}
@@ -107,15 +109,17 @@ defmodule Orchid.LLM.Anthropic do
     }
 
     # Add system prompt if present
-    body = if context.system && context.system != "" do
-      system_with_context = build_system_prompt(context.system, context.objects, context.memory)
-      Map.put(body, :system, system_with_context)
-    else
-      body
-    end
+    body =
+      if context.system && context.system != "" do
+        system_with_context = build_system_prompt(context.system, context.objects, context.memory)
+        Map.put(body, :system, system_with_context)
+      else
+        body
+      end
 
     # Add tools if available
     tools = Orchid.Tool.list_tools()
+
     if tools != [] do
       Map.put(body, :tools, format_tools(tools))
     else
@@ -127,21 +131,25 @@ defmodule Orchid.LLM.Anthropic do
     parts = [base_prompt]
 
     # Add object context
-    parts = if objects && objects != "" do
-      parts ++ ["\n\n## Available Objects\n\n#{objects}"]
-    else
-      parts
-    end
+    parts =
+      if objects && objects != "" do
+        parts ++ ["\n\n## Available Objects\n\n#{objects}"]
+      else
+        parts
+      end
 
     # Add memory context
-    parts = if memory && map_size(memory) > 0 do
-      memory_str = memory
-      |> Enum.map(fn {k, v} -> "- #{k}: #{inspect(v)}" end)
-      |> Enum.join("\n")
-      parts ++ ["\n\n## Memory\n\n#{memory_str}"]
-    else
-      parts
-    end
+    parts =
+      if memory && map_size(memory) > 0 do
+        memory_str =
+          memory
+          |> Enum.map(fn {k, v} -> "- #{k}: #{inspect(v)}" end)
+          |> Enum.join("\n")
+
+        parts ++ ["\n\n## Memory\n\n#{memory_str}"]
+      else
+        parts
+      end
 
     Enum.join(parts)
   end
@@ -158,28 +166,31 @@ defmodule Orchid.LLM.Anthropic do
   end
 
   defp format_assistant_message(msg) do
-    content = cond do
-      msg.tool_calls && msg.tool_calls != [] ->
-        text_block = if msg.content && msg.content != "" do
-          [%{type: "text", text: msg.content}]
-        else
-          []
-        end
+    content =
+      cond do
+        msg.tool_calls && msg.tool_calls != [] ->
+          text_block =
+            if msg.content && msg.content != "" do
+              [%{type: "text", text: msg.content}]
+            else
+              []
+            end
 
-        tool_blocks = Enum.map(msg.tool_calls, fn tc ->
-          %{
-            type: "tool_use",
-            id: tc.id,
-            name: tc.name,
-            input: tc.arguments
-          }
-        end)
+          tool_blocks =
+            Enum.map(msg.tool_calls, fn tc ->
+              %{
+                type: "tool_use",
+                id: tc.id,
+                name: tc.name,
+                input: tc.arguments
+              }
+            end)
 
-        text_block ++ tool_blocks
+          text_block ++ tool_blocks
 
-      true ->
-        msg.content
-    end
+        true ->
+          msg.content
+      end
 
     %{role: "assistant", content: content}
   end
@@ -201,21 +212,23 @@ defmodule Orchid.LLM.Anthropic do
     content_blocks = response["content"] || []
 
     # Extract text content
-    text_content = content_blocks
-    |> Enum.filter(fn block -> block["type"] == "text" end)
-    |> Enum.map(fn block -> block["text"] end)
-    |> Enum.join("")
+    text_content =
+      content_blocks
+      |> Enum.filter(fn block -> block["type"] == "text" end)
+      |> Enum.map(fn block -> block["text"] end)
+      |> Enum.join("")
 
     # Extract tool calls
-    tool_calls = content_blocks
-    |> Enum.filter(fn block -> block["type"] == "tool_use" end)
-    |> Enum.map(fn block ->
-      %{
-        id: block["id"],
-        name: block["name"],
-        arguments: block["input"]
-      }
-    end)
+    tool_calls =
+      content_blocks
+      |> Enum.filter(fn block -> block["type"] == "tool_use" end)
+      |> Enum.map(fn block ->
+        %{
+          id: block["id"],
+          name: block["name"],
+          arguments: block["input"]
+        }
+      end)
 
     tool_calls = if tool_calls == [], do: nil, else: tool_calls
 
@@ -230,6 +243,7 @@ defmodule Orchid.LLM.Anthropic do
       cond do
         String.starts_with?(line, "data: ") ->
           data = String.trim_leading(line, "data: ")
+
           if data != "[DONE]" do
             case Jason.decode(data) do
               {:ok, event} -> handle_stream_event(event, acc, callback)
@@ -250,6 +264,7 @@ defmodule Orchid.LLM.Anthropic do
     case event["type"] do
       "content_block_delta" ->
         delta = event["delta"]
+
         case delta["type"] do
           "text_delta" ->
             text = delta["text"]
@@ -266,6 +281,7 @@ defmodule Orchid.LLM.Anthropic do
 
       "content_block_start" ->
         content_block = event["content_block"]
+
         case content_block["type"] do
           "tool_use" ->
             tool = %{
@@ -273,6 +289,7 @@ defmodule Orchid.LLM.Anthropic do
               name: content_block["name"],
               arguments: %{}
             }
+
             %{acc | current_tool: tool}
 
           _ ->
@@ -281,10 +298,7 @@ defmodule Orchid.LLM.Anthropic do
 
       "content_block_stop" ->
         if acc.current_tool do
-          %{acc |
-            tool_calls: acc.tool_calls ++ [acc.current_tool],
-            current_tool: nil
-          }
+          %{acc | tool_calls: acc.tool_calls ++ [acc.current_tool], current_tool: nil}
         else
           acc
         end

@@ -30,9 +30,10 @@ defmodule Orchid.Tools.Shell do
   def execute(%{"command" => command} = args, _context) do
     timeout = args["timeout"] || 30_000
 
-    task = Task.async(fn ->
-      System.cmd("sh", ["-c", command], stderr_to_stdout: true)
-    end)
+    task =
+      Task.async(fn ->
+        System.cmd("sh", ["-c", command], stderr_to_stdout: true)
+      end)
 
     case Task.yield(task, timeout) || Task.shutdown(task) do
       {:ok, {output, 0}} ->

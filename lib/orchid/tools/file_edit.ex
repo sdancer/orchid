@@ -36,10 +36,12 @@ defmodule Orchid.Tools.FileEdit do
       {:ok, content} ->
         if String.contains?(content, old) do
           count = length(String.split(content, old)) - 1
+
           if count > 1 do
             {:error, "old_string appears #{count} times - must be unique. Add more context."}
           else
             new_content = String.replace(content, old, new, global: false)
+
             case File.write(path, new_content) do
               :ok -> {:ok, "Successfully edited #{path}"}
               {:error, reason} -> {:error, "Failed to write #{path}: #{reason}"}

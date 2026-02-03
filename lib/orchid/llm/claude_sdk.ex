@@ -137,16 +137,18 @@ defmodule Orchid.LLM.ClaudeSDK do
       unless File.exists?(@python_script) do
         {:error, :script_not_found}
       else
-        port = Port.open(
-          {:spawn_executable, python},
-          [
-            {:args, [@python_script]},
-            :binary,
-            :use_stdio,
-            {:line, 65536},
-            :exit_status
-          ]
-        )
+        port =
+          Port.open(
+            {:spawn_executable, python},
+            [
+              {:args, [@python_script]},
+              :binary,
+              :use_stdio,
+              {:line, 65536},
+              :exit_status
+            ]
+          )
+
         {:ok, port}
       end
     end
@@ -174,18 +176,21 @@ defmodule Orchid.LLM.ClaudeSDK do
         if state.caller do
           GenServer.reply(state.caller, :ok)
         end
+
         {:noreply, %{state | caller: nil, buffer: "", callback: nil}}
 
       {:ok, %{"type" => "pong"}} ->
         if state.caller do
           GenServer.reply(state.caller, :ok)
         end
+
         {:noreply, %{state | caller: nil, buffer: ""}}
 
       {:ok, %{"type" => "error", "content" => error}} ->
         if state.caller do
           GenServer.reply(state.caller, {:error, error})
         end
+
         {:noreply, %{state | caller: nil, buffer: "", callback: nil}}
 
       {:ok, %{"type" => "result"}} ->
@@ -197,6 +202,7 @@ defmodule Orchid.LLM.ClaudeSDK do
         if state.callback && content do
           state.callback.(%{type: type, content: content, tool_use: msg["tool_use"]})
         end
+
         {:noreply, %{state | buffer: ""}}
 
       {:ok, other} ->

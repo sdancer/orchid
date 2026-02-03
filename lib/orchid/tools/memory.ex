@@ -49,9 +49,10 @@ defmodule Orchid.Tools.Memory do
     if map_size(state.memory) == 0 do
       {:ok, "Memory is empty"}
     else
-      list = state.memory
-      |> Enum.map(fn {k, v} -> "- #{k}: #{inspect(v)}" end)
-      |> Enum.join("\n")
+      list =
+        state.memory
+        |> Enum.map(fn {k, v} -> "- #{k}: #{inspect(v)}" end)
+        |> Enum.join("\n")
 
       {:ok, "Memory contents:\n#{list}"}
     end

@@ -42,25 +42,27 @@ defmodule Orchid.LLM.CLI do
     end
   end
 
-
   defp build_prompt(context) do
     parts = []
 
     # Add system context
-    parts = if context[:system] && context.system != "" do
-      parts ++ ["System: #{context.system}\n"]
-    else
-      parts
-    end
+    parts =
+      if context[:system] && context.system != "" do
+        parts ++ ["System: #{context.system}\n"]
+      else
+        parts
+      end
 
     # Add messages
-    parts = parts ++ Enum.map(context.messages, fn msg ->
-      case msg.role do
-        :user -> msg.content
-        :assistant -> "Assistant: #{msg.content}"
-        :tool -> "Tool result: #{inspect(msg.content)}"
-      end
-    end)
+    parts =
+      parts ++
+        Enum.map(context.messages, fn msg ->
+          case msg.role do
+            :user -> msg.content
+            :assistant -> "Assistant: #{msg.content}"
+            :tool -> "Tool result: #{inspect(msg.content)}"
+          end
+        end)
 
     Enum.join(parts, "\n\n")
   end
@@ -71,5 +73,4 @@ defmodule Orchid.LLM.CLI do
   defp model_flag(:opus), do: ["--model", "opus"]
   defp model_flag(model) when is_binary(model), do: ["--model", model]
   defp model_flag(_), do: []
-
 end
