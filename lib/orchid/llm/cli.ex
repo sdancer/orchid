@@ -23,14 +23,24 @@ defmodule Orchid.LLM.CLI do
 
     Logger.debug("Claude CLI args: #{inspect(args)}")
 
-    case System.cmd("claude", args, stderr_to_stdout: true) do
-      {output, 0} ->
-        {:ok, %{content: String.trim(output), tool_calls: nil}}
+    # Use :os.cmd instead of System.cmd as it handles the claude CLI better
+    cmd = build_shell_command(args)
+    output = :os.cmd(String.to_charlist(cmd))
+    content = to_string(output) |> String.trim()
 
-      {error, code} ->
-        Logger.error("Claude CLI error (#{code}): #{error}")
-        {:error, {:cli_error, code, error}}
-    end
+    {:ok, %{content: content, tool_calls: nil}}
+  end
+
+  defp build_shell_command(args) do
+    claude_path = System.find_executable("claude") || "claude"
+    escaped_args = Enum.map(args, &shell_escape/1)
+    "#{claude_path} #{Enum.join(escaped_args, " ")}"
+  end
+
+  defp shell_escape(arg) do
+    # Escape single quotes and wrap in single quotes
+    escaped = String.replace(arg, "'", "'\\''")
+    "'#{escaped}'"
   end
 
   @doc """
@@ -88,7 +98,8 @@ defmodule Orchid.LLM.CLI do
   defp build_args(config, context, prompt, opts \\ []) do
     streaming = Keyword.get(opts, :stream, false)
 
-    args = ["-p", prompt, "--print"]
+    # Start with --print flag (non-interactive mode)
+    args = ["--print"]
 
     # Output format
     args =
@@ -151,7 +162,8 @@ defmodule Orchid.LLM.CLI do
         args
       end
 
-    args
+    # Prompt is a positional argument at the end
+    args ++ [prompt]
   end
 
   defp model_flag(nil), do: []
