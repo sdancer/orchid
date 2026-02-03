@@ -261,8 +261,9 @@ defmodule Orchid.Agent do
 
   defp do_run_loop(state, iterations_left, _last_response) do
     context = build_context(state)
+    config = build_llm_config(state)
 
-    case LLM.chat(state.config, context) do
+    case LLM.chat(config, context) do
       {:ok, %{content: content, tool_calls: nil}} ->
         state = add_assistant_message(state, content)
         {:ok, content, state}
@@ -298,8 +299,9 @@ defmodule Orchid.Agent do
 
   defp do_run_loop_streaming(state, callback, iterations_left, _last_response) do
     context = build_context(state)
+    config = build_llm_config(state)
 
-    case LLM.chat_stream(state.config, context, callback) do
+    case LLM.chat_stream(config, context, callback) do
       {:ok, %{content: content, tool_calls: nil}} ->
         state = add_assistant_message(state, content)
         {:ok, content, state}
@@ -342,6 +344,22 @@ defmodule Orchid.Agent do
       messages: state.messages,
       memory: state.memory
     }
+  end
+
+  defp build_llm_config(state) do
+    config = state.config
+
+    # For CLI provider, use agent id as session_id and resume if messages exist
+    if config[:provider] == :cli do
+      # Check if we have previous assistant messages (indicating ongoing conversation)
+      has_history = Enum.any?(state.messages, fn msg -> msg.role == :assistant end)
+
+      config
+      |> Map.put(:session_id, state.id)
+      |> Map.put(:resume, has_history)
+    else
+      config
+    end
   end
 
   defp execute_tool_calls(state, tool_calls) do
