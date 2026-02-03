@@ -3,18 +3,20 @@ defmodule Orchid.LLM do
   Unified interface for LLM providers.
 
   Providers:
-  - :oauth - OAuth tokens from .claude_tokens.json (subscription) - DEFAULT
+  - :cli - Claude CLI wrapper (uses claude command) - DEFAULT
+  - :oauth - OAuth tokens from .claude_tokens.json (subscription)
   - :anthropic - Direct API calls (pay per token, needs ANTHROPIC_API_KEY)
   """
 
-  alias Orchid.LLM.{Anthropic, OAuth}
+  alias Orchid.LLM.{Anthropic, OAuth, CLI}
 
   @doc """
   Send a chat request to the configured LLM provider.
   Returns {:ok, %{content: String.t(), tool_calls: list() | nil}}
   """
   def chat(config, context) do
-    case config[:provider] || :oauth do
+    case config[:provider] || :cli do
+      :cli -> CLI.chat(config, context)
       :oauth -> OAuth.chat(config, context)
       :anthropic -> Anthropic.chat(config, context)
       provider -> {:error, {:unsupported_provider, provider}}
@@ -26,7 +28,8 @@ defmodule Orchid.LLM do
   Callback receives text chunks as they arrive.
   """
   def chat_stream(config, context, callback) do
-    case config[:provider] || :oauth do
+    case config[:provider] || :cli do
+      :cli -> CLI.chat_stream(config, context, callback)
       :oauth -> OAuth.chat_stream(config, context, callback)
       :anthropic -> Anthropic.chat_stream(config, context, callback)
       provider -> {:error, {:unsupported_provider, provider}}
