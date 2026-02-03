@@ -25,6 +25,11 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:new_goal_name, "")
       |> assign(:editing_goal, nil)
       |> assign(:adding_dependency_to, nil)
+      |> assign(:templates, Orchid.Object.list_agent_templates())
+      |> assign(:selected_template, nil)
+      |> assign(:creating_template, false)
+      |> assign(:template_name, "")
+      |> assign(:template_system_prompt, "")
 
     socket =
       if agent_id do
@@ -75,10 +80,28 @@ defmodule OrchidWeb.AgentLive do
 
   @impl true
   def handle_event("create_agent", _params, socket) do
-    config = %{
-      model: socket.assigns.model,
-      provider: socket.assigns.provider
-    }
+    # Start with defaults or template values
+    config =
+      case socket.assigns.selected_template do
+        nil ->
+          %{
+            model: socket.assigns.model,
+            provider: socket.assigns.provider
+          }
+
+        template_id ->
+          case Orchid.Object.get(template_id) do
+            {:ok, template} ->
+              %{
+                model: template.metadata[:model] || socket.assigns.model,
+                provider: template.metadata[:provider] || socket.assigns.provider,
+                system_prompt: template.content
+              }
+
+            _ ->
+              %{model: socket.assigns.model, provider: socket.assigns.provider}
+          end
+      end
 
     config =
       if socket.assigns.current_project do
@@ -124,6 +147,90 @@ defmodule OrchidWeb.AgentLive do
 
   def handle_event("update_provider", %{"provider" => provider}, socket) do
     {:noreply, assign(socket, :provider, String.to_existing_atom(provider))}
+  end
+
+  # Template events
+  def handle_event("select_template", %{"id" => ""}, socket) do
+    {:noreply, assign(socket, :selected_template, nil)}
+  end
+
+  def handle_event("select_template", %{"id" => id}, socket) do
+    socket =
+      case Orchid.Object.get(id) do
+        {:ok, template} ->
+          socket
+          |> assign(:selected_template, id)
+          |> assign(:model, template.metadata[:model] || :opus)
+          |> assign(:provider, template.metadata[:provider] || :cli)
+
+        _ ->
+          socket
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("show_create_template", _params, socket) do
+    {:noreply,
+     assign(socket,
+       creating_template: true,
+       template_name: "",
+       template_system_prompt: ""
+     )}
+  end
+
+  def handle_event("cancel_create_template", _params, socket) do
+    {:noreply, assign(socket, creating_template: false)}
+  end
+
+  def handle_event("update_template_name", %{"name" => name}, socket) do
+    {:noreply, assign(socket, :template_name, name)}
+  end
+
+  def handle_event("update_template_system_prompt", %{"prompt" => prompt}, socket) do
+    {:noreply, assign(socket, :template_system_prompt, prompt)}
+  end
+
+  def handle_event("create_template", _params, socket) do
+    name = String.trim(socket.assigns.template_name)
+    prompt = socket.assigns.template_system_prompt
+
+    if name != "" do
+      {:ok, _template} =
+        Orchid.Object.create(:agent_template, name, prompt,
+          metadata: %{
+            model: socket.assigns.model,
+            provider: socket.assigns.provider
+          }
+        )
+
+      {:noreply,
+       assign(socket,
+         templates: Orchid.Object.list_agent_templates(),
+         creating_template: false,
+         template_name: "",
+         template_system_prompt: ""
+       )}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("delete_template", %{"id" => id}, socket) do
+    Orchid.Object.delete(id)
+
+    socket =
+      socket
+      |> assign(:templates, Orchid.Object.list_agent_templates())
+      |> then(fn s ->
+        if s.assigns.selected_template == id do
+          assign(s, :selected_template, nil)
+        else
+          s
+        end
+      end)
+
+    {:noreply, socket}
   end
 
   def handle_event("search_projects", %{"query" => query}, socket) do
@@ -512,6 +619,15 @@ defmodule OrchidWeb.AgentLive do
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <a href="/prompts" class="btn btn-secondary">Prompts</a>
+              <select class="model-select" phx-change="select_template" name="id" title="Template">
+                <option value="" selected={@selected_template == nil}>No Template</option>
+                <%= for template <- @templates do %>
+                  <option value={template.id} selected={@selected_template == template.id}>
+                    <%= template.name %>
+                  </option>
+                <% end %>
+              </select>
+              <button class="btn btn-secondary" phx-click="show_create_template" title="New Template" style="padding: 0.4rem 0.6rem;">+T</button>
               <select class="model-select" phx-change="update_provider" name="provider" title="Backend">
                 <option value="cli" selected={@provider == :cli}>CLI</option>
                 <option value="oauth" selected={@provider == :oauth}>API</option>
@@ -524,6 +640,43 @@ defmodule OrchidWeb.AgentLive do
               <button class="btn" phx-click="create_agent">New Agent</button>
             </div>
           </div>
+
+          <%= if @creating_template do %>
+            <div class="template-form" style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin-bottom: 1rem;">
+              <h3 style="color: #c9d1d9; margin: 0 0 1rem 0;">Create Agent Template</h3>
+              <form phx-submit="create_template">
+                <div style="margin-bottom: 0.75rem;">
+                  <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">Name</label>
+                  <input
+                    type="text"
+                    name="name"
+                    value={@template_name}
+                    phx-change="update_template_name"
+                    placeholder="Template name"
+                    class="sidebar-search"
+                    style="width: 100%;"
+                    autofocus
+                  />
+                </div>
+                <div style="margin-bottom: 0.75rem;">
+                  <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">
+                    System Prompt (Model: <%= @model %>, Provider: <%= @provider %>)
+                  </label>
+                  <textarea
+                    name="prompt"
+                    phx-change="update_template_system_prompt"
+                    placeholder="System prompt for this template..."
+                    class="sidebar-search"
+                    style="width: 100%; min-height: 150px; resize: vertical;"
+                  ><%= @template_system_prompt %></textarea>
+                </div>
+                <div style="display: flex; gap: 0.5rem;">
+                  <button type="submit" class="btn">Create Template</button>
+                  <button type="button" class="btn btn-secondary" phx-click="cancel_create_template">Cancel</button>
+                </div>
+              </form>
+            </div>
+          <% end %>
 
           <%= if @current_agent do %>
             <div class="chat-container">
