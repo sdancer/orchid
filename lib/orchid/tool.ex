@@ -14,7 +14,11 @@ defmodule Orchid.Tool do
     Orchid.Tools.FileRead,
     Orchid.Tools.FileEdit,
     Orchid.Tools.FileGrep,
-    Orchid.Tools.Eval
+    Orchid.Tools.Eval,
+    Orchid.Tools.PromptList,
+    Orchid.Tools.PromptRead,
+    Orchid.Tools.PromptCreate,
+    Orchid.Tools.PromptUpdate
   ]
 
   @doc """
