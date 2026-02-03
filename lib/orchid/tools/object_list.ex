@@ -17,7 +17,7 @@ defmodule Orchid.Tools.ObjectList do
       properties: %{
         type: %{
           type: "string",
-          enum: ["file", "artifact", "markdown", "function"],
+          enum: ["file", "artifact", "markdown", "function", "prompt", "project"],
           description: "Filter by object type (optional)"
         }
       },
@@ -29,21 +29,23 @@ defmodule Orchid.Tools.ObjectList do
   def execute(args, _context) do
     objects = Object.list()
 
-    objects = if args["type"] do
-      type = String.to_existing_atom(args["type"])
-      Enum.filter(objects, fn obj -> obj.type == type end)
-    else
-      objects
-    end
+    objects =
+      if args["type"] do
+        type = String.to_existing_atom(args["type"])
+        Enum.filter(objects, fn obj -> obj.type == type end)
+      else
+        objects
+      end
 
     if objects == [] do
       {:ok, "No objects found"}
     else
-      list = objects
-      |> Enum.map(fn obj ->
-        "- #{obj.id}: #{obj.name} (#{obj.type})"
-      end)
-      |> Enum.join("\n")
+      list =
+        objects
+        |> Enum.map(fn obj ->
+          "- #{obj.id}: #{obj.name} (#{obj.type})"
+        end)
+        |> Enum.join("\n")
 
       {:ok, "Objects:\n#{list}"}
     end

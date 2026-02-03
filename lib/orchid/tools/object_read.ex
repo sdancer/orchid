@@ -28,15 +28,16 @@ defmodule Orchid.Tools.ObjectRead do
   def execute(%{"id" => id}, _context) do
     case Object.get(id) do
       {:ok, obj} ->
-        {:ok, """
-        Name: #{obj.name}
-        Type: #{obj.type}
-        Language: #{obj.language || "unknown"}
-        Path: #{obj.path || "N/A"}
+        {:ok,
+         """
+         Name: #{obj.name}
+         Type: #{obj.type}
+         Language: #{obj.language || "unknown"}
+         Path: #{obj.path || "N/A"}
 
-        Content:
-        #{obj.content}
-        """}
+         Content:
+         #{obj.content}
+         """}
 
       {:error, :not_found} ->
         {:error, "Object not found: #{id}"}

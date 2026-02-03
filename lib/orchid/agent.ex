@@ -13,6 +13,7 @@ defmodule Orchid.Agent do
     defstruct [
       :id,
       :config,
+      :project_id,
       messages: [],
       objects: [],
       tool_history: [],
@@ -36,16 +37,22 @@ defmodule Orchid.Agent do
     id = generate_id()
 
     # Default to OAuth (uses subscription via .claude_tokens.json)
-    config = Map.merge(%{
-      provider: :oauth,  # Uses OAuth tokens (subscription-based)
-      model: :opus,      # Can be :sonnet, :haiku, :opus
-      system_prompt: default_system_prompt()
-    }, config)
+    config =
+      Map.merge(
+        %{
+          # Uses OAuth tokens (subscription-based)
+          provider: :oauth,
+          # Can be :sonnet, :haiku, :opus
+          model: :opus,
+          system_prompt: default_system_prompt()
+        },
+        config
+      )
 
     case DynamicSupervisor.start_child(
-      Orchid.AgentSupervisor,
-      {__MODULE__, {id, config}}
-    ) do
+           Orchid.AgentSupervisor,
+           {__MODULE__, {id, config}}
+         ) do
       {:ok, _pid} -> {:ok, id}
       {:error, reason} -> {:error, reason}
     end
@@ -134,8 +141,10 @@ defmodule Orchid.Agent do
   def init({id, config}) do
     state = %State{
       id: id,
-      config: config
+      config: config,
+      project_id: config[:project_id]
     }
+
     Store.put_agent_state(id, state)
     {:ok, state}
   end
@@ -147,12 +156,13 @@ defmodule Orchid.Agent do
 
   def handle_call({:attach, object_ids}, _from, state) do
     # Verify all objects exist
-    valid_ids = Enum.filter(object_ids, fn id ->
-      case Object.get(id) do
-        {:ok, _} -> true
-        _ -> false
-      end
-    end)
+    valid_ids =
+      Enum.filter(object_ids, fn id ->
+        case Object.get(id) do
+          {:ok, _} -> true
+          _ -> false
+        end
+      end)
 
     new_objects = Enum.uniq(state.objects ++ valid_ids)
     state = %{state | objects: new_objects}
@@ -237,6 +247,7 @@ defmodule Orchid.Agent do
       tool_calls: tool_calls,
       timestamp: DateTime.utc_now()
     }
+
     %{state | messages: state.messages ++ [message]}
   end
 
@@ -264,9 +275,10 @@ defmodule Orchid.Agent do
         {state, tool_results} = execute_tool_calls(state, tool_calls)
 
         # Add tool results as messages
-        state = Enum.reduce(tool_results, state, fn result, acc ->
-          add_message(acc, :tool, result)
-        end)
+        state =
+          Enum.reduce(tool_results, state, fn result, acc ->
+            add_message(acc, :tool, result)
+          end)
 
         # Continue the loop
         do_run_loop(state, iterations_left - 1, content)
@@ -298,9 +310,10 @@ defmodule Orchid.Agent do
 
         {state, tool_results} = execute_tool_calls(state, tool_calls)
 
-        state = Enum.reduce(tool_results, state, fn result, acc ->
-          add_message(acc, :tool, result)
-        end)
+        state =
+          Enum.reduce(tool_results, state, fn result, acc ->
+            add_message(acc, :tool, result)
+          end)
 
         do_run_loop_streaming(state, callback, iterations_left - 1, content)
 
@@ -311,16 +324,17 @@ defmodule Orchid.Agent do
 
   defp build_context(state) do
     # Build context with attached objects
-    object_context = state.objects
-    |> Enum.map(&Object.get/1)
-    |> Enum.filter(fn
-      {:ok, _} -> true
-      _ -> false
-    end)
-    |> Enum.map(fn {:ok, obj} ->
-      "[Object: #{obj.name} (#{obj.type})]\n#{obj.content}"
-    end)
-    |> Enum.join("\n\n")
+    object_context =
+      state.objects
+      |> Enum.map(&Object.get/1)
+      |> Enum.filter(fn
+        {:ok, _} -> true
+        _ -> false
+      end)
+      |> Enum.map(fn {:ok, obj} ->
+        "[Object: #{obj.name} (#{obj.type})]\n#{obj.content}"
+      end)
+      |> Enum.join("\n\n")
 
     %{
       system: state.config.system_prompt,

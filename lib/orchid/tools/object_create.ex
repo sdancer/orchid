@@ -8,7 +8,7 @@ defmodule Orchid.Tools.ObjectCreate do
   def name, do: "object_create"
 
   @impl true
-  def description, do: "Create a new object (file, artifact, markdown, or function)"
+  def description, do: "Create a new object (file, artifact, markdown, function, prompt, or project)"
 
   @impl true
   def parameters do
@@ -17,7 +17,7 @@ defmodule Orchid.Tools.ObjectCreate do
       properties: %{
         type: %{
           type: "string",
-          enum: ["file", "artifact", "markdown", "function"],
+          enum: ["file", "artifact", "markdown", "function", "prompt", "project"],
           description: "The type of object to create"
         },
         name: %{

@@ -11,19 +11,19 @@ defmodule Orchid.Object do
 
   alias Orchid.Store
 
-  @type object_type :: :file | :artifact | :markdown | :function
+  @type object_type :: :file | :artifact | :markdown | :function | :prompt | :project | :goal
   @type t :: %__MODULE__{
-    id: String.t(),
-    type: object_type(),
-    name: String.t(),
-    path: String.t() | nil,
-    content: String.t(),
-    language: String.t() | nil,
-    metadata: map(),
-    versions: [map()],
-    created_at: DateTime.t(),
-    updated_at: DateTime.t()
-  }
+          id: String.t(),
+          type: object_type(),
+          name: String.t(),
+          path: String.t() | nil,
+          content: String.t(),
+          language: String.t() | nil,
+          metadata: map(),
+          versions: [map()],
+          created_at: DateTime.t(),
+          updated_at: DateTime.t()
+        }
 
   defstruct [
     :id,
@@ -46,7 +46,8 @@ defmodule Orchid.Object do
   - `:language` - programming language (for syntax/eval)
   - `:metadata` - additional metadata map
   """
-  def create(type, name, content, opts \\ []) when type in [:file, :artifact, :markdown, :function] do
+  def create(type, name, content, opts \\ [])
+      when type in [:file, :artifact, :markdown, :function, :prompt, :project, :goal] do
     now = DateTime.utc_now()
 
     object = %__MODULE__{
@@ -85,10 +86,11 @@ defmodule Orchid.Object do
         timestamp: object.updated_at
       }
 
-      updated = %{object |
-        content: new_content,
-        versions: [version | object.versions] |> Enum.take(50),
-        updated_at: now
+      updated = %{
+        object
+        | content: new_content,
+          versions: [version | object.versions] |> Enum.take(50),
+          updated_at: now
       }
 
       :ok = Store.put_object(updated)
@@ -108,6 +110,53 @@ defmodule Orchid.Object do
   """
   def list do
     Store.list_objects()
+  end
+
+  @doc """
+  List all prompt objects.
+  """
+  def list_prompts do
+    list() |> Enum.filter(fn obj -> obj.type == :prompt end)
+  end
+
+  @doc """
+  List all project objects.
+  """
+  def list_projects do
+    list() |> Enum.filter(fn obj -> obj.type == :project end)
+  end
+
+  @doc """
+  List all goal objects.
+  """
+  def list_goals do
+    list() |> Enum.filter(fn obj -> obj.type == :goal end)
+  end
+
+  @doc """
+  List goals for a specific project.
+  """
+  def list_goals_for_project(project_id) do
+    list_goals() |> Enum.filter(fn obj -> obj.metadata[:project_id] == project_id end)
+  end
+
+  @doc """
+  Update an object's metadata.
+  """
+  def update_metadata(id, metadata_updates) do
+    with {:ok, object} <- get(id) do
+      now = DateTime.utc_now()
+      updated_metadata = Map.merge(object.metadata, metadata_updates)
+
+      updated = %{
+        object
+        | metadata: updated_metadata,
+          updated_at: now
+      }
+
+      :ok = Store.put_object(updated)
+      {:ok, updated}
+    end
   end
 
   @doc """
@@ -137,12 +186,15 @@ defmodule Orchid.Object do
       case object.versions do
         [] ->
           {:error, :no_history}
+
         [prev | rest] ->
-          restored = %{object |
-            content: prev.content,
-            versions: rest,
-            updated_at: DateTime.utc_now()
+          restored = %{
+            object
+            | content: prev.content,
+              versions: rest,
+              updated_at: DateTime.utc_now()
           }
+
           :ok = Store.put_object(restored)
           {:ok, restored}
       end
@@ -159,6 +211,9 @@ defmodule Orchid.Object do
     cond do
       type == :markdown -> "markdown"
       type == :function -> "elixir"
+      type == :prompt -> "markdown"
+      type == :project -> nil
+      type == :goal -> nil
       true -> detect_from_extension(name)
     end
   end
