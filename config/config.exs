@@ -16,4 +16,6 @@ config :logger, level: :info
 
 config :orchid, :data_dir, "priv/data"
 
+config :esbuild, :version, "0.25.0"
+
 import_config "#{config_env()}.exs"
