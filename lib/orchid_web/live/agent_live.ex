@@ -336,7 +336,7 @@ defmodule OrchidWeb.AgentLive do
     end
   end
 
-  defp start_stream(socket, agent_id, input) do
+  defp start_stream(_socket, agent_id, input) do
     pid = self()
 
     Task.start(fn ->

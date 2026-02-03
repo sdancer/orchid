@@ -23,12 +23,37 @@ defmodule Orchid.LLM.CLI do
 
     Logger.debug("Claude CLI args: #{inspect(args)}")
 
-    # Use :os.cmd instead of System.cmd as it handles the claude CLI better
-    cmd = build_shell_command(args)
-    output = :os.cmd(String.to_charlist(cmd))
-    content = to_string(output) |> String.trim()
+    # Run in a Task to avoid blocking the caller
+    task = Task.async(fn ->
+      cmd = build_shell_command(args)
+      output = :os.cmd(String.to_charlist(cmd))
+      to_string(output) |> String.trim()
+    end)
 
-    {:ok, %{content: content, tool_calls: nil}}
+    case Task.yield(task, 120_000) || Task.shutdown(task) do
+      {:ok, content} ->
+        {:ok, %{content: content, tool_calls: nil}}
+
+      nil ->
+        {:error, :timeout}
+    end
+  end
+
+  @doc """
+  Stream a chat request via Claude CLI.
+  Streams output via callback.
+  """
+  def chat_stream(config, context, callback) do
+    # For CLI, we run the command and stream the result after
+    # True streaming would require parsing stream-json format
+    case chat(config, context) do
+      {:ok, %{content: content}} = result ->
+        callback.(content)
+        result
+
+      error ->
+        error
+    end
   end
 
   defp build_shell_command(args) do
@@ -41,47 +66,6 @@ defmodule Orchid.LLM.CLI do
     # Escape single quotes and wrap in single quotes
     escaped = String.replace(arg, "'", "'\\''")
     "'#{escaped}'"
-  end
-
-  @doc """
-  Stream a chat request via Claude CLI.
-  Uses Port for real-time streaming.
-  """
-  def chat_stream(config, context, callback) do
-    prompt = get_prompt(context)
-    args = build_args(config, context, prompt, stream: true)
-
-    Logger.debug("Claude CLI stream args: #{inspect(args)}")
-
-    port =
-      Port.open({:spawn_executable, System.find_executable("claude")}, [
-        {:args, args},
-        :binary,
-        :exit_status,
-        :use_stdio,
-        :stderr_to_stdout
-      ])
-
-    collect_stream(port, callback, "")
-  end
-
-  defp collect_stream(port, callback, acc) do
-    receive do
-      {^port, {:data, data}} ->
-        callback.(data)
-        collect_stream(port, callback, acc <> data)
-
-      {^port, {:exit_status, 0}} ->
-        {:ok, %{content: String.trim(acc), tool_calls: nil}}
-
-      {^port, {:exit_status, code}} ->
-        Logger.error("Claude CLI stream error (#{code}): #{acc}")
-        {:error, {:cli_error, code, acc}}
-    after
-      120_000 ->
-        Port.close(port)
-        {:error, :timeout}
-    end
   end
 
   defp get_prompt(context) do

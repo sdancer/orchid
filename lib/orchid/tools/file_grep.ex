@@ -39,7 +39,7 @@ defmodule Orchid.Tools.FileGrep do
 
     case System.cmd("rg", cmd_args, stderr_to_stdout: true) do
       {output, 0} -> {:ok, output}
-      {output, 1} -> {:ok, "No matches found"}
+      {_output, 1} -> {:ok, "No matches found"}
       {output, _} -> {:error, "grep failed: #{output}"}
     end
   rescue
