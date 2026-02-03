@@ -27,6 +27,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:adding_dependency_to, nil)
       |> assign(:templates, Orchid.Object.list_agent_templates())
       |> assign(:selected_template, nil)
+      |> assign(:current_agent_template, nil)
       |> assign(:creating_template, false)
       |> assign(:template_name, "")
       |> assign(:template_model, :opus)
@@ -68,16 +69,41 @@ defmodule OrchidWeb.AgentLive do
       if agent_id do
         case Orchid.Agent.get_state(agent_id) do
           {:ok, state} ->
-            assign(socket, :messages, format_messages(state.messages))
+            template_info = get_template_info(state.config[:template_id])
+
+            socket
+            |> assign(:messages, format_messages(state.messages))
+            |> assign(:current_agent_template, template_info)
 
           _ ->
-            assign(socket, :messages, [])
+            socket
+            |> assign(:messages, [])
+            |> assign(:current_agent_template, nil)
         end
       else
-        assign(socket, :messages, [])
+        socket
+        |> assign(:messages, [])
+        |> assign(:current_agent_template, nil)
       end
 
     {:noreply, socket}
+  end
+
+  defp get_template_info(nil), do: nil
+
+  defp get_template_info(template_id) do
+    case Orchid.Object.get(template_id) do
+      {:ok, template} ->
+        %{
+          id: template.id,
+          name: template.name,
+          model: template.metadata[:model],
+          provider: template.metadata[:provider]
+        }
+
+      _ ->
+        nil
+    end
   end
 
   @impl true
@@ -97,7 +123,8 @@ defmodule OrchidWeb.AgentLive do
               %{
                 model: template.metadata[:model] || socket.assigns.model,
                 provider: template.metadata[:provider] || socket.assigns.provider,
-                system_prompt: template.content
+                system_prompt: template.content,
+                template_id: template_id
               }
 
             _ ->
@@ -721,6 +748,14 @@ defmodule OrchidWeb.AgentLive do
 
           <%= if @current_agent do %>
             <div class="chat-container">
+              <%= if @current_agent_template do %>
+                <div class="template-header" style="background: #21262d; border-bottom: 1px solid #30363d; padding: 0.5rem 1rem; display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem;">
+                  <span style="color: #8b949e;">Template:</span>
+                  <span style="color: #58a6ff; font-weight: 500;"><%= @current_agent_template.name %></span>
+                  <span style="color: #6e7681;">•</span>
+                  <span style="color: #8b949e;"><%= @current_agent_template.provider %> / <%= @current_agent_template.model %></span>
+                </div>
+              <% end %>
               <div class="messages" id="messages" phx-hook="ScrollBottom">
                 <%= for msg <- @messages do %>
                   <%= case msg.role do %>
