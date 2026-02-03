@@ -14,7 +14,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:streaming, false)
       |> assign(:stream_content, "")
       |> assign(:model, :opus)
-      |> assign(:provider, :oauth)
+      |> assign(:provider, :cli)
       |> assign(:projects, Orchid.Object.list_projects())
       |> assign(:project_query, "")
       |> assign(:current_project, nil)
@@ -513,8 +513,8 @@ defmodule OrchidWeb.AgentLive do
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <a href="/prompts" class="btn btn-secondary">Prompts</a>
               <select class="model-select" phx-change="update_provider" name="provider" title="Backend">
-                <option value="oauth" selected={@provider == :oauth}>API</option>
                 <option value="cli" selected={@provider == :cli}>CLI</option>
+                <option value="oauth" selected={@provider == :oauth}>API</option>
               </select>
               <select class="model-select" phx-change="update_model" name="model">
                 <option value="opus" selected={@model == :opus}>Opus</option>
