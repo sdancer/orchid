@@ -26,7 +26,11 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:editing_goal, nil)
       |> assign(:adding_dependency_to, nil)
       |> assign(:templates, Orchid.Object.list_agent_templates())
-      |> assign(:selected_template, nil)
+      |> then(fn s ->
+        templates = s.assigns.templates
+        first_template = List.first(templates)
+        assign(s, :selected_template, first_template && first_template.id)
+      end)
       |> assign(:current_agent_template, nil)
       |> assign(:creating_template, false)
       |> assign(:template_name, "")
@@ -108,28 +112,22 @@ defmodule OrchidWeb.AgentLive do
 
   @impl true
   def handle_event("create_agent", _params, socket) do
-    # Start with defaults or template values
+    template_id = socket.assigns.selected_template
+
+    # Template is required
     config =
-      case socket.assigns.selected_template do
-        nil ->
+      case Orchid.Object.get(template_id) do
+        {:ok, template} ->
           %{
-            model: socket.assigns.model,
-            provider: socket.assigns.provider
+            model: template.metadata[:model] || :opus,
+            provider: template.metadata[:provider] || :cli,
+            system_prompt: template.content,
+            template_id: template_id
           }
 
-        template_id ->
-          case Orchid.Object.get(template_id) do
-            {:ok, template} ->
-              %{
-                model: template.metadata[:model] || socket.assigns.model,
-                provider: template.metadata[:provider] || socket.assigns.provider,
-                system_prompt: template.content,
-                template_id: template_id
-              }
-
-            _ ->
-              %{model: socket.assigns.model, provider: socket.assigns.provider}
-          end
+        _ ->
+          # Fallback (shouldn't happen with UI validation)
+          %{model: :opus, provider: :cli}
       end
 
     config =
@@ -183,10 +181,6 @@ defmodule OrchidWeb.AgentLive do
   end
 
   # Template events
-  def handle_event("select_template", %{"id" => ""}, socket) do
-    {:noreply, assign(socket, :selected_template, nil)}
-  end
-
   def handle_event("select_template", %{"id" => id}, socket) do
     socket =
       case Orchid.Object.get(id) do
@@ -259,7 +253,7 @@ defmodule OrchidWeb.AgentLive do
     prompt = socket.assigns.template_system_prompt
 
     if name != "" do
-      {:ok, _template} =
+      {:ok, template} =
         Orchid.Object.create(:agent_template, name, prompt,
           metadata: %{
             model: socket.assigns.template_model,
@@ -270,6 +264,7 @@ defmodule OrchidWeb.AgentLive do
       {:noreply,
        assign(socket,
          templates: Orchid.Object.list_agent_templates(),
+         selected_template: template.id,
          creating_template: false,
          template_name: "",
          template_system_prompt: ""
@@ -681,16 +676,21 @@ defmodule OrchidWeb.AgentLive do
               <h1>Orchid</h1>
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <select class="model-select" phx-change="select_template" name="id" title="Template">
-                <option value="" selected={@selected_template == nil}>No Template</option>
-                <%= for template <- @templates do %>
-                  <option value={template.id} selected={@selected_template == template.id}>
-                    <%= template.name %>
-                  </option>
-                <% end %>
-              </select>
+              <%= if @templates != [] do %>
+                <select class="model-select" phx-change="select_template" name="id" title="Template">
+                  <%= for template <- @templates do %>
+                    <option value={template.id} selected={@selected_template == template.id}>
+                      <%= template.name %>
+                    </option>
+                  <% end %>
+                </select>
+              <% end %>
               <button class="btn btn-secondary" phx-click="show_create_template" title="New Template" style="padding: 0.4rem 0.6rem;">+T</button>
-              <button class="btn" phx-click="create_agent">New Agent</button>
+              <%= if @selected_template do %>
+                <button class="btn" phx-click="create_agent">New Agent</button>
+              <% else %>
+                <span style="color: #8b949e; font-size: 0.85rem;">Create a template first</span>
+              <% end %>
             </div>
           </div>
 
