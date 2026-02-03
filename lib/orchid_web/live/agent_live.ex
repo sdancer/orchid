@@ -14,6 +14,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:streaming, false)
       |> assign(:stream_content, "")
       |> assign(:model, :opus)
+      |> assign(:provider, :oauth)
       |> assign(:projects, Orchid.Object.list_projects())
       |> assign(:project_query, "")
       |> assign(:current_project, nil)
@@ -74,7 +75,10 @@ defmodule OrchidWeb.AgentLive do
 
   @impl true
   def handle_event("create_agent", _params, socket) do
-    config = %{model: socket.assigns.model}
+    config = %{
+      model: socket.assigns.model,
+      provider: socket.assigns.provider
+    }
 
     config =
       if socket.assigns.current_project do
@@ -116,6 +120,10 @@ defmodule OrchidWeb.AgentLive do
 
   def handle_event("update_model", %{"model" => model}, socket) do
     {:noreply, assign(socket, :model, String.to_existing_atom(model))}
+  end
+
+  def handle_event("update_provider", %{"provider" => provider}, socket) do
+    {:noreply, assign(socket, :provider, String.to_existing_atom(provider))}
   end
 
   def handle_event("search_projects", %{"query" => query}, socket) do
@@ -504,6 +512,10 @@ defmodule OrchidWeb.AgentLive do
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <a href="/prompts" class="btn btn-secondary">Prompts</a>
+              <select class="model-select" phx-change="update_provider" name="provider" title="Backend">
+                <option value="oauth" selected={@provider == :oauth}>API</option>
+                <option value="cli" selected={@provider == :cli}>CLI</option>
+              </select>
               <select class="model-select" phx-change="update_model" name="model">
                 <option value="opus" selected={@model == :opus}>Opus</option>
                 <option value="sonnet" selected={@model == :sonnet}>Sonnet</option>
