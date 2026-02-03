@@ -29,6 +29,8 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:selected_template, nil)
       |> assign(:creating_template, false)
       |> assign(:template_name, "")
+      |> assign(:template_model, :opus)
+      |> assign(:template_provider, :cli)
       |> assign(:template_system_prompt, "")
 
     socket =
@@ -175,6 +177,8 @@ defmodule OrchidWeb.AgentLive do
      assign(socket,
        creating_template: true,
        template_name: "",
+       template_model: socket.assigns.model,
+       template_provider: socket.assigns.provider,
        template_system_prompt: ""
      )}
   end
@@ -185,6 +189,14 @@ defmodule OrchidWeb.AgentLive do
 
   def handle_event("update_template_name", %{"name" => name}, socket) do
     {:noreply, assign(socket, :template_name, name)}
+  end
+
+  def handle_event("update_template_model", %{"model" => model}, socket) do
+    {:noreply, assign(socket, :template_model, String.to_existing_atom(model))}
+  end
+
+  def handle_event("update_template_provider", %{"provider" => provider}, socket) do
+    {:noreply, assign(socket, :template_provider, String.to_existing_atom(provider))}
   end
 
   def handle_event("update_template_system_prompt", %{"prompt" => prompt}, socket) do
@@ -199,8 +211,8 @@ defmodule OrchidWeb.AgentLive do
       {:ok, _template} =
         Orchid.Object.create(:agent_template, name, prompt,
           metadata: %{
-            model: socket.assigns.model,
-            provider: socket.assigns.provider
+            model: socket.assigns.template_model,
+            provider: socket.assigns.template_provider
           }
         )
 
@@ -658,10 +670,25 @@ defmodule OrchidWeb.AgentLive do
                     autofocus
                   />
                 </div>
+                <div style="display: flex; gap: 0.75rem; margin-bottom: 0.75rem;">
+                  <div style="flex: 1;">
+                    <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">Provider</label>
+                    <select class="sidebar-search" style="width: 100%;" phx-change="update_template_provider" name="provider">
+                      <option value="cli" selected={@template_provider == :cli}>CLI</option>
+                      <option value="oauth" selected={@template_provider == :oauth}>API</option>
+                    </select>
+                  </div>
+                  <div style="flex: 1;">
+                    <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">Model</label>
+                    <select class="sidebar-search" style="width: 100%;" phx-change="update_template_model" name="model">
+                      <option value="opus" selected={@template_model == :opus}>Opus</option>
+                      <option value="sonnet" selected={@template_model == :sonnet}>Sonnet</option>
+                      <option value="haiku" selected={@template_model == :haiku}>Haiku</option>
+                    </select>
+                  </div>
+                </div>
                 <div style="margin-bottom: 0.75rem;">
-                  <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">
-                    System Prompt (Model: <%= @model %>, Provider: <%= @provider %>)
-                  </label>
+                  <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">System Prompt</label>
                   <textarea
                     name="prompt"
                     phx-change="update_template_system_prompt"
