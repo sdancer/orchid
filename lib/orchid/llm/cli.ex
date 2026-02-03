@@ -105,20 +105,21 @@ defmodule Orchid.LLM.CLI do
         args
       end
 
-    # Session ID for persistent conversations
+    # Session handling:
+    # - First message: use --session-id to create session with specific ID
+    # - Subsequent messages: use --resume <session-id> to continue
     args =
-      if config[:session_id] do
-        args ++ ["--session-id", config[:session_id]]
-      else
-        args
-      end
+      cond do
+        config[:resume] && config[:session_id] ->
+          # Resume existing session by ID
+          args ++ ["--resume", config[:session_id]]
 
-    # Resume existing session
-    args =
-      if config[:resume] do
-        args ++ ["--resume"]
-      else
-        args
+        config[:session_id] ->
+          # First message - create session with specific ID
+          args ++ ["--session-id", config[:session_id]]
+
+        true ->
+          args
       end
 
     # Max turns for agentic mode

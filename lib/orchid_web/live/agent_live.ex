@@ -13,6 +13,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:input, "")
       |> assign(:streaming, false)
       |> assign(:stream_content, "")
+      |> assign(:pending_message, nil)
       |> assign(:model, :opus)
       |> assign(:provider, :cli)
       |> assign(:projects, Orchid.Object.list_projects())
@@ -485,16 +486,15 @@ defmodule OrchidWeb.AgentLive do
       {:noreply, socket}
     else
       agent_id = socket.assigns.current_agent
-      messages = socket.assigns.messages ++ [%{role: :user, content: input, tool_calls: nil}]
 
+      # Don't add message to list yet - store as pending
       socket =
         socket
-        |> assign(:messages, messages)
+        |> assign(:pending_message, input)
         |> assign(:input, "")
         |> assign(:streaming, true)
         |> assign(:stream_content, "")
         |> assign(:retry_count, 0)
-        |> assign(:last_input, input)
 
       start_stream(socket, agent_id, input)
       {:noreply, socket}
@@ -523,15 +523,19 @@ defmodule OrchidWeb.AgentLive do
   end
 
   def handle_info(:stream_done, socket) do
-    messages =
-      socket.assigns.messages ++
-        [%{role: :assistant, content: socket.assigns.stream_content, tool_calls: nil}]
+    # Add both the user message and assistant response
+    pending = socket.assigns[:pending_message]
+    user_msg = %{role: :user, content: pending, tool_calls: nil}
+    assistant_msg = %{role: :assistant, content: socket.assigns.stream_content, tool_calls: nil}
+
+    messages = socket.assigns.messages ++ [user_msg, assistant_msg]
 
     socket =
       socket
       |> assign(:messages, messages)
       |> assign(:streaming, false)
       |> assign(:stream_content, "")
+      |> assign(:pending_message, nil)
 
     {:noreply, socket}
   end
@@ -563,8 +567,9 @@ defmodule OrchidWeb.AgentLive do
       Process.send_after(self(), :retry_stream, 10_000)
       {:noreply, socket}
     else
-      # Max retries reached
+      # Max retries reached - restore pending message to input for editing
       error_msg = format_error(reason)
+      pending = socket.assigns[:pending_message] || ""
 
       messages =
         socket.assigns.messages ++
@@ -575,6 +580,8 @@ defmodule OrchidWeb.AgentLive do
         |> assign(:messages, messages)
         |> assign(:streaming, false)
         |> assign(:stream_content, "")
+        |> assign(:input, pending)
+        |> assign(:pending_message, nil)
 
       {:noreply, socket}
     end
@@ -582,7 +589,7 @@ defmodule OrchidWeb.AgentLive do
 
   def handle_info(:retry_stream, socket) do
     agent_id = socket.assigns.current_agent
-    input = socket.assigns[:last_input] || ""
+    input = socket.assigns[:pending_message] || ""
     start_stream(socket, agent_id, input)
     {:noreply, socket}
   end
@@ -805,7 +812,6 @@ defmodule OrchidWeb.AgentLive do
                   phx-hook="CtrlEnterSubmit"
                   name="input"
                   value={@input}
-                  disabled={@streaming}
                 ><%= @input %></textarea>
                 <button class="btn" type="submit" disabled={@streaming}>
                   <%= if @streaming, do: "...", else: "Send" %>
