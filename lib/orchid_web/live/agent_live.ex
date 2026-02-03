@@ -487,9 +487,12 @@ defmodule OrchidWeb.AgentLive do
     else
       agent_id = socket.assigns.current_agent
 
-      # Don't add message to list yet - store as pending
+      # Add user message to list immediately so it shows in chat
+      messages = socket.assigns.messages ++ [%{role: :user, content: input, tool_calls: nil}]
+
       socket =
         socket
+        |> assign(:messages, messages)
         |> assign(:pending_message, input)
         |> assign(:input, "")
         |> assign(:streaming, true)
@@ -523,12 +526,9 @@ defmodule OrchidWeb.AgentLive do
   end
 
   def handle_info(:stream_done, socket) do
-    # Add both the user message and assistant response
-    pending = socket.assigns[:pending_message]
-    user_msg = %{role: :user, content: pending, tool_calls: nil}
+    # Add assistant response (user message was already added when sent)
     assistant_msg = %{role: :assistant, content: socket.assigns.stream_content, tool_calls: nil}
-
-    messages = socket.assigns.messages ++ [user_msg, assistant_msg]
+    messages = socket.assigns.messages ++ [assistant_msg]
 
     socket =
       socket
