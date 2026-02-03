@@ -26,7 +26,9 @@ defmodule Orchid.MixProject do
       {:phoenix_live_view, "~> 1.0"},
       {:phoenix_html, "~> 4.0"},
       {:bandit, "~> 1.0"},
-      {:esbuild, "~> 0.8", runtime: Mix.env() == :dev}
+      {:cubdb, "~> 2.0"},
+      {:esbuild, "~> 0.8", runtime: Mix.env() == :dev},
+      {:phoenix_live_reload, "~> 1.2", only: :dev}
     ]
   end
 end

@@ -1,12 +1,9 @@
 defmodule Orchid.Store do
   @moduledoc """
-  ETS-backed storage for objects and agent state.
-  Provides fast in-memory persistence with future LMDB support.
+  CubDB-backed persistent storage for objects and agent state.
+  Provides ACID-compliant, crash-safe persistence.
   """
   use GenServer
-
-  @objects_table :orchid_objects
-  @agents_table :orchid_agents
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -14,55 +11,116 @@ defmodule Orchid.Store do
 
   # Object operations
   def put_object(object) do
-    :ets.insert(@objects_table, {object.id, object})
-    :ok
+    GenServer.call(__MODULE__, {:put_object, object})
   end
 
   def get_object(id) do
-    case :ets.lookup(@objects_table, id) do
-      [{^id, object}] -> {:ok, object}
-      [] -> {:error, :not_found}
-    end
+    GenServer.call(__MODULE__, {:get_object, id})
   end
 
   def delete_object(id) do
-    :ets.delete(@objects_table, id)
-    :ok
+    GenServer.call(__MODULE__, {:delete_object, id})
   end
 
   def list_objects do
-    :ets.tab2list(@objects_table)
-    |> Enum.map(fn {_id, object} -> object end)
+    GenServer.call(__MODULE__, :list_objects)
   end
 
   # Agent state operations
   def put_agent_state(agent_id, state) do
-    :ets.insert(@agents_table, {agent_id, state})
-    :ok
+    GenServer.call(__MODULE__, {:put_agent_state, agent_id, state})
   end
 
   def get_agent_state(agent_id) do
-    case :ets.lookup(@agents_table, agent_id) do
-      [{^agent_id, state}] -> {:ok, state}
-      [] -> {:error, :not_found}
-    end
+    GenServer.call(__MODULE__, {:get_agent_state, agent_id})
   end
 
   def delete_agent_state(agent_id) do
-    :ets.delete(@agents_table, agent_id)
-    :ok
+    GenServer.call(__MODULE__, {:delete_agent_state, agent_id})
   end
 
   def list_agent_states do
-    :ets.tab2list(@agents_table)
-    |> Enum.map(fn {_id, state} -> state end)
+    GenServer.call(__MODULE__, :list_agent_states)
   end
 
   # GenServer callbacks
   @impl true
   def init(_opts) do
-    :ets.new(@objects_table, [:named_table, :set, :public, read_concurrency: true])
-    :ets.new(@agents_table, [:named_table, :set, :public, read_concurrency: true])
-    {:ok, %{}}
+    data_dir = Application.get_env(:orchid, :data_dir, "priv/data")
+
+    objects_dir = Path.join(data_dir, "objects")
+    agents_dir = Path.join(data_dir, "agents")
+
+    File.mkdir_p!(objects_dir)
+    File.mkdir_p!(agents_dir)
+
+    {:ok, objects_db} = CubDB.start_link(data_dir: objects_dir)
+    {:ok, agents_db} = CubDB.start_link(data_dir: agents_dir)
+
+    {:ok, %{objects_db: objects_db, agents_db: agents_db}}
+  end
+
+  @impl true
+  def handle_call({:put_object, object}, _from, state) do
+    CubDB.put(state.objects_db, object.id, object)
+    {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_call({:get_object, id}, _from, state) do
+    result =
+      case CubDB.get(state.objects_db, id) do
+        nil -> {:error, :not_found}
+        object -> {:ok, object}
+      end
+
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:delete_object, id}, _from, state) do
+    CubDB.delete(state.objects_db, id)
+    {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_call(:list_objects, _from, state) do
+    objects =
+      CubDB.select(state.objects_db)
+      |> Enum.map(fn {_id, object} -> object end)
+
+    {:reply, objects, state}
+  end
+
+  @impl true
+  def handle_call({:put_agent_state, agent_id, agent_state}, _from, state) do
+    CubDB.put(state.agents_db, agent_id, agent_state)
+    {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_call({:get_agent_state, agent_id}, _from, state) do
+    result =
+      case CubDB.get(state.agents_db, agent_id) do
+        nil -> {:error, :not_found}
+        agent_state -> {:ok, agent_state}
+      end
+
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:delete_agent_state, agent_id}, _from, state) do
+    CubDB.delete(state.agents_db, agent_id)
+    {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_call(:list_agent_states, _from, state) do
+    agent_states =
+      CubDB.select(state.agents_db)
+      |> Enum.map(fn {_id, agent_state} -> agent_state end)
+
+    {:reply, agent_states, state}
   end
 end

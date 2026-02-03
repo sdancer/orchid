@@ -13,3 +13,7 @@ config :orchid, OrchidWeb.Endpoint,
 config :phoenix, :json_library, Jason
 
 config :logger, level: :info
+
+config :orchid, :data_dir, "priv/data"
+
+import_config "#{config_env()}.exs"
