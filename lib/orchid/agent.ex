@@ -349,17 +349,31 @@ defmodule Orchid.Agent do
   defp build_llm_config(state) do
     config = state.config
 
-    # For CLI provider, use agent id as session_id and resume if messages exist
+    # For CLI provider, use a UUID session_id and resume if messages exist
     if config[:provider] == :cli do
       # Check if we have previous assistant messages (indicating ongoing conversation)
       has_history = Enum.any?(state.messages, fn msg -> msg.role == :assistant end)
 
+      # Generate a deterministic UUID from agent ID for session
+      session_uuid = agent_id_to_uuid(state.id)
+
       config
-      |> Map.put(:session_id, state.id)
+      |> Map.put(:session_id, session_uuid)
       |> Map.put(:resume, has_history)
     else
       config
     end
+  end
+
+  defp agent_id_to_uuid(agent_id) do
+    # Create a deterministic UUID v5-like ID from agent_id
+    # Using SHA256 and formatting as UUID
+    <<a::32, b::16, c::16, d::16, e::48, _rest::binary>> =
+      :crypto.hash(:sha256, agent_id)
+
+    # Format as UUID string
+    :io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", [a, b, c, d, e])
+    |> IO.iodata_to_binary()
   end
 
   defp execute_tool_calls(state, tool_calls) do
