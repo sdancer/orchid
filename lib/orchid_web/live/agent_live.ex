@@ -120,6 +120,10 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, push_patch(socket, to: "/agent/#{id}")}
   end
 
+  def handle_event("go_home", _params, socket) do
+    {:noreply, push_patch(socket, to: "/")}
+  end
+
   def handle_event("stop_agent", %{"id" => id}, socket) do
     Orchid.Agent.stop(id)
     # Small delay to ensure Registry is updated after process terminates
@@ -173,13 +177,33 @@ defmodule OrchidWeb.AgentLive do
   end
 
   def handle_event("show_create_template", _params, socket) do
+    # If a template is selected, use its values as starting point
+    {model, provider, prompt} =
+      case socket.assigns.selected_template do
+        nil ->
+          {socket.assigns.model, socket.assigns.provider, ""}
+
+        template_id ->
+          case Orchid.Object.get(template_id) do
+            {:ok, template} ->
+              {
+                template.metadata[:model] || :opus,
+                template.metadata[:provider] || :cli,
+                template.content || ""
+              }
+
+            _ ->
+              {socket.assigns.model, socket.assigns.provider, ""}
+          end
+      end
+
     {:noreply,
      assign(socket,
        creating_template: true,
        template_name: "",
-       template_model: socket.assigns.model,
-       template_provider: socket.assigns.provider,
-       template_system_prompt: ""
+       template_model: model,
+       template_provider: provider,
+       template_system_prompt: prompt
      )}
   end
 
@@ -625,12 +649,11 @@ defmodule OrchidWeb.AgentLive do
           <div class="header">
             <div style="display: flex; align-items: center; gap: 1rem;">
               <%= if @current_agent do %>
-                <a href="/" class="btn btn-secondary" style="padding: 0.4rem 0.6rem;">&larr;</a>
+                <button class="btn btn-secondary" style="padding: 0.4rem 0.6rem;" phx-click="go_home">&larr;</button>
               <% end %>
               <h1>Orchid</h1>
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <a href="/prompts" class="btn btn-secondary">Prompts</a>
               <select class="model-select" phx-change="select_template" name="id" title="Template">
                 <option value="" selected={@selected_template == nil}>No Template</option>
                 <%= for template <- @templates do %>
@@ -640,15 +663,6 @@ defmodule OrchidWeb.AgentLive do
                 <% end %>
               </select>
               <button class="btn btn-secondary" phx-click="show_create_template" title="New Template" style="padding: 0.4rem 0.6rem;">+T</button>
-              <select class="model-select" phx-change="update_provider" name="provider" title="Backend">
-                <option value="cli" selected={@provider == :cli}>CLI</option>
-                <option value="oauth" selected={@provider == :oauth}>API</option>
-              </select>
-              <select class="model-select" phx-change="update_model" name="model">
-                <option value="opus" selected={@model == :opus}>Opus</option>
-                <option value="sonnet" selected={@model == :sonnet}>Sonnet</option>
-                <option value="haiku" selected={@model == :haiku}>Haiku</option>
-              </select>
               <button class="btn" phx-click="create_agent">New Agent</button>
             </div>
           </div>
