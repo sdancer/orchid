@@ -14,6 +14,7 @@ defmodule Orchid.Agent do
       :id,
       :config,
       :project_id,
+      :sandbox,
       messages: [],
       objects: [],
       tool_history: [],
@@ -100,6 +101,13 @@ defmodule Orchid.Agent do
   end
 
   @doc """
+  Reset the sandbox for an agent.
+  """
+  def reset_sandbox(agent_id) do
+    call(agent_id, :reset_sandbox)
+  end
+
+  @doc """
   Stop an agent.
   """
   def stop(agent_id) do
@@ -146,7 +154,32 @@ defmodule Orchid.Agent do
     }
 
     Store.put_agent_state(id, state)
-    {:ok, state}
+
+    if state.project_id do
+      {:ok, state, {:continue, :start_sandbox}}
+    else
+      {:ok, state}
+    end
+  end
+
+  @impl true
+  def handle_continue(:start_sandbox, state) do
+    state =
+      case DynamicSupervisor.start_child(
+             Orchid.AgentSupervisor,
+             {Orchid.Sandbox, {state.id, state.project_id}}
+           ) do
+        {:ok, _pid} ->
+          sandbox_status = Orchid.Sandbox.status(state.id)
+          %{state | sandbox: sandbox_status}
+
+        {:error, reason} ->
+          Logger.warning("Agent #{state.id}: sandbox failed to start: #{inspect(reason)}")
+          state
+      end
+
+    Store.put_agent_state(state.id, state)
+    {:noreply, state}
   end
 
   @impl true
@@ -204,6 +237,22 @@ defmodule Orchid.Agent do
     end
   end
 
+  def handle_call(:reset_sandbox, _from, state) do
+    if state.sandbox do
+      case Orchid.Sandbox.reset(state.id) do
+        {:ok, status} ->
+          new_state = %{state | sandbox: status}
+          Store.put_agent_state(state.id, new_state)
+          {:reply, {:ok, status}, new_state}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :no_sandbox}, state}
+    end
+  end
+
   def handle_call({:remember, key, value}, _from, state) do
     state = %{state | memory: Map.put(state.memory, key, value)}
     Store.put_agent_state(state.id, state)
@@ -216,6 +265,7 @@ defmodule Orchid.Agent do
 
   @impl true
   def terminate(_reason, state) do
+    if state.sandbox, do: Orchid.Sandbox.stop(state.id)
     Store.delete_agent_state(state.id)
     :ok
   end

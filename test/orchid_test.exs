@@ -49,9 +49,9 @@ defmodule OrchidTest do
     test "list_tools returns all tools" do
       tools = Orchid.Tool.list_tools()
 
-      assert length(tools) == 8
-      assert Enum.any?(tools, &(&1.name == "object_read"))
+      assert length(tools) == 11
       assert Enum.any?(tools, &(&1.name == "shell"))
+      assert Enum.any?(tools, &(&1.name == "sandbox_reset"))
       assert Enum.any?(tools, &(&1.name == "eval"))
     end
 

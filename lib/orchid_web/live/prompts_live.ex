@@ -119,6 +119,7 @@ defmodule OrchidWeb.PromptsLive do
 
     if name != "" do
       {:ok, project} = Object.create(:project, name, "")
+      Orchid.Project.ensure_dir(project.id)
 
       {:noreply,
        assign(socket,
@@ -133,6 +134,7 @@ defmodule OrchidWeb.PromptsLive do
   end
 
   def handle_event("delete_project", %{"id" => id}, socket) do
+    Orchid.Project.delete_dir(id)
     Object.delete(id)
 
     socket =
@@ -342,6 +344,7 @@ defmodule OrchidWeb.PromptsLive do
             <h1>Orchid</h1>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <a href="/" class="btn btn-secondary">Agents</a>
+              <a href="/settings" class="btn btn-secondary">Settings</a>
               <button class="btn" phx-click="new_prompt">New Prompt</button>
             </div>
           </div>

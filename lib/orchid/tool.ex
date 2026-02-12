@@ -14,12 +14,16 @@ defmodule Orchid.Tool do
     Orchid.Tools.FileRead,
     Orchid.Tools.FileEdit,
     Orchid.Tools.FileGrep,
+    Orchid.Tools.Shell,
     Orchid.Tools.Eval,
     Orchid.Tools.PromptList,
     Orchid.Tools.PromptRead,
     Orchid.Tools.PromptCreate,
-    Orchid.Tools.PromptUpdate
+    Orchid.Tools.PromptUpdate,
+    Orchid.Tools.SandboxReset
   ]
+
+  @sandboxed_tools ~w(shell read edit list grep)
 
   @doc """
   List all available tools with their schemas.
@@ -36,15 +40,47 @@ defmodule Orchid.Tool do
 
   @doc """
   Execute a tool by name.
+  Routes sandboxed tools through the sandbox when active.
   """
   def execute(name, args, context) do
     case find_tool(name) do
-      nil -> {:error, {:unknown_tool, name}}
-      mod -> mod.execute(args, context)
+      nil ->
+        {:error, {:unknown_tool, name}}
+
+      mod ->
+        if name in @sandboxed_tools and sandbox_active?(context) do
+          execute_in_sandbox(name, args, context)
+        else
+          mod.execute(args, context)
+        end
     end
   end
 
   defp find_tool(name) do
     Enum.find(@tools, fn mod -> mod.name() == name end)
+  end
+
+  defp sandbox_active?(%{agent_state: %{sandbox: s}}) when not is_nil(s) and s != false, do: true
+  defp sandbox_active?(_), do: false
+
+  defp execute_in_sandbox(name, args, ctx) do
+    aid = ctx.agent_state.id
+
+    case name do
+      "shell" ->
+        Orchid.Sandbox.exec(aid, args["command"], timeout: args["timeout"] || 30_000)
+
+      "read" ->
+        Orchid.Sandbox.read_file(aid, args["path"])
+
+      "edit" ->
+        Orchid.Sandbox.edit_file(aid, args["path"], args["old_string"], args["new_string"])
+
+      "list" ->
+        Orchid.Sandbox.list_files(aid, args["path"] || "/workspace")
+
+      "grep" ->
+        Orchid.Sandbox.grep_files(aid, args["pattern"], args["path"] || "/workspace", glob: args["glob"])
+    end
   end
 end

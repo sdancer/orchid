@@ -39,12 +39,17 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:template_provider, :cli)
       |> assign(:template_system_prompt, "")
       |> assign(:template_category, "General")
+      |> assign(:sandbox_active, false)
+      |> assign(:sandbox_status, nil)
 
     socket =
       if agent_id do
         case Orchid.Agent.get_state(agent_id) do
           {:ok, state} ->
-            assign(socket, :messages, format_messages(state.messages))
+            socket
+            |> assign(:messages, format_messages(state.messages))
+            |> assign(:sandbox_active, state.sandbox != nil)
+            |> assign(:sandbox_status, state.sandbox && state.sandbox[:status])
 
           _ ->
             socket
@@ -80,16 +85,22 @@ defmodule OrchidWeb.AgentLive do
             socket
             |> assign(:messages, format_messages(state.messages))
             |> assign(:current_agent_template, template_info)
+            |> assign(:sandbox_active, state.sandbox != nil)
+            |> assign(:sandbox_status, state.sandbox && state.sandbox[:status])
 
           _ ->
             socket
             |> assign(:messages, [])
             |> assign(:current_agent_template, nil)
+            |> assign(:sandbox_active, false)
+            |> assign(:sandbox_status, nil)
         end
       else
         socket
         |> assign(:messages, [])
         |> assign(:current_agent_template, nil)
+        |> assign(:sandbox_active, false)
+        |> assign(:sandbox_status, nil)
       end
 
     {:noreply, socket}
@@ -335,6 +346,7 @@ defmodule OrchidWeb.AgentLive do
 
     if name != "" do
       {:ok, project} = Orchid.Object.create(:project, name, "")
+      Orchid.Project.ensure_dir(project.id)
 
       {:noreply,
        assign(socket,
@@ -349,6 +361,7 @@ defmodule OrchidWeb.AgentLive do
   end
 
   def handle_event("delete_project", %{"id" => id}, socket) do
+    Orchid.Project.delete_dir(id)
     Orchid.Object.delete(id)
 
     socket =
@@ -484,6 +497,25 @@ defmodule OrchidWeb.AgentLive do
 
       _ ->
         {:noreply, socket}
+    end
+  end
+
+  def handle_event("reset_sandbox", _params, socket) do
+    agent_id = socket.assigns.current_agent
+
+    if agent_id do
+      case Orchid.Agent.reset_sandbox(agent_id) do
+        {:ok, status} ->
+          {:noreply,
+           socket
+           |> assign(:sandbox_status, status[:status])
+           |> assign(:sandbox_active, true)}
+
+        {:error, _reason} ->
+          {:noreply, socket}
+      end
+    else
+      {:noreply, socket}
     end
   end
 
@@ -706,6 +738,8 @@ defmodule OrchidWeb.AgentLive do
                   </select>
                 </form>
               <% end %>
+              <a href="/prompts" class="btn btn-secondary" style="padding: 0.4rem 0.6rem;">Prompts</a>
+              <a href="/settings" class="btn btn-secondary" style="padding: 0.4rem 0.6rem;">Settings</a>
               <button class="btn btn-secondary" phx-click="show_create_template" title="New Template" style="padding: 0.4rem 0.6rem;">+T</button>
               <%= if @selected_template do %>
                 <button class="btn" phx-click="create_agent">New Agent</button>
@@ -759,6 +793,7 @@ defmodule OrchidWeb.AgentLive do
                       <option value="cli" selected={@template_provider == :cli}>CLI</option>
                       <option value="oauth" selected={@template_provider == :oauth}>API</option>
                       <option value="gemini" selected={@template_provider == :gemini}>Gemini</option>
+                      <option value="cerebras" selected={@template_provider == :cerebras}>Cerebras</option>
                     </select>
                   </div>
                   <div style="flex: 1;">
@@ -770,6 +805,12 @@ defmodule OrchidWeb.AgentLive do
                       <option value="gemini_pro" selected={@template_model == :gemini_pro}>Gemini Pro</option>
                       <option value="gemini_flash" selected={@template_model == :gemini_flash}>Gemini Flash</option>
                       <option value="gemini_flash_image" selected={@template_model == :gemini_flash_image}>Gemini Flash Image</option>
+                      <option value="llama_3_1_8b" selected={@template_model == :llama_3_1_8b}>Llama 3.1 8B</option>
+                      <option value="llama_3_3_70b" selected={@template_model == :llama_3_3_70b}>Llama 3.3 70B</option>
+                      <option value="gpt_oss_120b" selected={@template_model == :gpt_oss_120b}>GPT OSS 120B</option>
+                      <option value="qwen_3_32b" selected={@template_model == :qwen_3_32b}>Qwen 3 32B</option>
+                      <option value="qwen_3_235b" selected={@template_model == :qwen_3_235b}>Qwen 3 235B</option>
+                      <option value="zai_glm_4_7" selected={@template_model == :zai_glm_4_7}>Z.ai GLM 4.7</option>
                     </select>
                   </div>
                 </div>
@@ -793,6 +834,12 @@ defmodule OrchidWeb.AgentLive do
 
           <%= if @current_agent do %>
             <div class="chat-container">
+              <%= if @sandbox_active do %>
+                <div style="background: #1a2332; border-bottom: 1px solid #30363d; padding: 0.4rem 1rem; font-size: 0.8rem; display: flex; align-items: center; justify-content: space-between;">
+                  <span style="color: #7ee787;">Sandbox: <%= @sandbox_status %></span>
+                  <button class="btn btn-secondary btn-sm" style="padding: 0.15rem 0.5rem; font-size: 0.75rem;" phx-click="reset_sandbox">Reset</button>
+                </div>
+              <% end %>
               <%= if @current_agent_template do %>
                 <div class="template-header" style="background: #21262d; border-bottom: 1px solid #30363d; padding: 0.5rem 1rem; display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem;">
                   <span style="color: #8b949e;">Template:</span>
@@ -861,9 +908,12 @@ defmodule OrchidWeb.AgentLive do
           <% else %>
             <%= if @current_project do %>
               <div class="project-detail" style="margin-bottom: 1.5rem;">
-                <h2 style="color: #c9d1d9; margin-bottom: 1rem;">
+                <h2 style="color: #c9d1d9; margin-bottom: 0.5rem;">
                   Project: <%= get_project_name(@projects, @current_project) %>
                 </h2>
+                <div style="color: #8b949e; font-size: 0.85rem; margin-bottom: 1rem;">
+                  Folder: <%= Orchid.Project.files_path(@current_project) %>
+                </div>
 
                 <div class="goals-section" style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin-bottom: 1rem;">
                   <h3 style="color: #c9d1d9; margin: 0 0 1rem 0; font-size: 1rem;">Goals</h3>
@@ -981,6 +1031,11 @@ defmodule OrchidWeb.AgentLive do
                       <span class="project-badge"><%= get_project_name(@projects, agent.project_id) %></span>
                     </div>
                   <% end %>
+                  <%= if agent.sandbox_status do %>
+                    <div style="margin-top: 0.25rem;">
+                      <span style="background: #1a2332; color: #7ee787; padding: 0.15rem 0.5rem; border-radius: 3px; font-size: 0.75rem;"><%= agent.sandbox_status %></span>
+                    </div>
+                  <% end %>
                   <div class="actions">
                     <button class="btn btn-secondary" phx-click="select_agent" phx-value-id={agent.id}>Open</button>
                     <button class="btn btn-danger" phx-click="stop_agent" phx-value-id={agent.id}>Stop</button>
@@ -1043,8 +1098,15 @@ defmodule OrchidWeb.AgentLive do
     Orchid.Agent.list()
     |> Enum.map(fn agent_id ->
       case Orchid.Agent.get_state(agent_id) do
-        {:ok, state} -> %{id: agent_id, project_id: state.project_id}
-        _ -> %{id: agent_id, project_id: nil}
+        {:ok, state} ->
+          %{
+            id: agent_id,
+            project_id: state.project_id,
+            sandbox_status: state.sandbox && state.sandbox[:status]
+          }
+
+        _ ->
+          %{id: agent_id, project_id: nil, sandbox_status: nil}
       end
     end)
   end
