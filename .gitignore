@@ -23,6 +23,7 @@ erl_crash.dump
 orchid_temp-*.tar
 
 .claude_tokens.json
+.env
 
 # CubDB persistent data
 /priv/data/

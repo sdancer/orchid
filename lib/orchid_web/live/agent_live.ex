@@ -38,6 +38,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:template_model, :opus)
       |> assign(:template_provider, :cli)
       |> assign(:template_system_prompt, "")
+      |> assign(:template_category, "General")
 
     socket =
       if agent_id do
@@ -103,7 +104,8 @@ defmodule OrchidWeb.AgentLive do
           id: template.id,
           name: template.name,
           model: template.metadata[:model],
-          provider: template.metadata[:provider]
+          provider: template.metadata[:provider],
+          category: template.metadata[:category] || "General"
         }
 
       _ ->
@@ -225,7 +227,8 @@ defmodule OrchidWeb.AgentLive do
        template_name: "",
        template_model: model,
        template_provider: provider,
-       template_system_prompt: prompt
+       template_system_prompt: prompt,
+       template_category: "General"
      )}
   end
 
@@ -249,6 +252,10 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, assign(socket, :template_system_prompt, prompt)}
   end
 
+  def handle_event("update_template_category", %{"category" => category}, socket) do
+    {:noreply, assign(socket, :template_category, category)}
+  end
+
   def handle_event("create_template", _params, socket) do
     name = String.trim(socket.assigns.template_name)
     prompt = socket.assigns.template_system_prompt
@@ -258,7 +265,8 @@ defmodule OrchidWeb.AgentLive do
         Orchid.Object.create(:agent_template, name, prompt,
           metadata: %{
             model: socket.assigns.template_model,
-            provider: socket.assigns.template_provider
+            provider: socket.assigns.template_provider,
+            category: socket.assigns.template_category
           }
         )
 
@@ -684,13 +692,19 @@ defmodule OrchidWeb.AgentLive do
             </div>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <%= if @templates != [] do %>
-                <select class="model-select" phx-change="select_template" name="id" title="Template">
-                  <%= for template <- @templates do %>
-                    <option value={template.id} selected={@selected_template == template.id}>
-                      <%= template.name %>
-                    </option>
-                  <% end %>
-                </select>
+                <form phx-change="select_template" style="display: inline;">
+                  <select class="model-select" name="id" title="Template">
+                    <%= for {category, templates} <- group_templates_by_category(@templates) do %>
+                      <optgroup label={category}>
+                        <%= for template <- templates do %>
+                          <option value={template.id} selected={@selected_template == template.id}>
+                            <%= template.name %>
+                          </option>
+                        <% end %>
+                      </optgroup>
+                    <% end %>
+                  </select>
+                </form>
               <% end %>
               <button class="btn btn-secondary" phx-click="show_create_template" title="New Template" style="padding: 0.4rem 0.6rem;">+T</button>
               <%= if @selected_template do %>
@@ -720,10 +734,31 @@ defmodule OrchidWeb.AgentLive do
                 </div>
                 <div style="display: flex; gap: 0.75rem; margin-bottom: 0.75rem;">
                   <div style="flex: 1;">
+                    <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">Category</label>
+                    <input
+                      type="text"
+                      name="category"
+                      value={@template_category}
+                      phx-change="update_template_category"
+                      placeholder="Category"
+                      class="sidebar-search"
+                      style="width: 100%;"
+                      list="category-suggestions"
+                    />
+                    <datalist id="category-suggestions">
+                      <option value="General" />
+                      <option value="Coding" />
+                      <option value="Writing" />
+                      <option value="Analysis" />
+                      <option value="Research" />
+                    </datalist>
+                  </div>
+                  <div style="flex: 1;">
                     <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">Provider</label>
                     <select class="sidebar-search" style="width: 100%;" phx-change="update_template_provider" name="provider">
                       <option value="cli" selected={@template_provider == :cli}>CLI</option>
                       <option value="oauth" selected={@template_provider == :oauth}>API</option>
+                      <option value="gemini" selected={@template_provider == :gemini}>Gemini</option>
                     </select>
                   </div>
                   <div style="flex: 1;">
@@ -732,6 +767,9 @@ defmodule OrchidWeb.AgentLive do
                       <option value="opus" selected={@template_model == :opus}>Opus</option>
                       <option value="sonnet" selected={@template_model == :sonnet}>Sonnet</option>
                       <option value="haiku" selected={@template_model == :haiku}>Haiku</option>
+                      <option value="gemini_pro" selected={@template_model == :gemini_pro}>Gemini Pro</option>
+                      <option value="gemini_flash" selected={@template_model == :gemini_flash}>Gemini Flash</option>
+                      <option value="gemini_flash_image" selected={@template_model == :gemini_flash_image}>Gemini Flash Image</option>
                     </select>
                   </div>
                 </div>
@@ -759,6 +797,8 @@ defmodule OrchidWeb.AgentLive do
                 <div class="template-header" style="background: #21262d; border-bottom: 1px solid #30363d; padding: 0.5rem 1rem; display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem;">
                   <span style="color: #8b949e;">Template:</span>
                   <span style="color: #58a6ff; font-weight: 500;"><%= @current_agent_template.name %></span>
+                  <span style="color: #6e7681;">•</span>
+                  <span style="color: #7ee787;"><%= @current_agent_template.category %></span>
                   <span style="color: #6e7681;">•</span>
                   <span style="color: #8b949e;"><%= @current_agent_template.provider %> / <%= @current_agent_template.model %></span>
                 </div>
@@ -1014,6 +1054,15 @@ defmodule OrchidWeb.AgentLive do
   defp filter_agents(agents, current_project) do
     Enum.filter(agents, fn agent ->
       agent.project_id == current_project
+    end)
+  end
+
+  defp group_templates_by_category(templates) do
+    templates
+    |> Enum.group_by(fn t -> t.metadata[:category] || "General" end)
+    |> Enum.sort_by(fn {category, _} ->
+      # "General" first, then alphabetical
+      if category == "General", do: {0, category}, else: {1, category}
     end)
   end
 end
