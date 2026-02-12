@@ -299,24 +299,23 @@ defmodule Orchid.Sandbox do
       "run", "-d",
       "--name", state.container_name,
       "--cap-add=SYS_ADMIN",
+      "--device", "/dev/fuse",
       "-v", "#{state.lower_path}:/workspace_lower:ro",
       "-v", "#{state.upper_path}:/workspace_upper",
       "-v", "#{state.work_path}:/workspace_work",
       state.image,
       "sh", "-c",
-      "mkdir -p /workspace && mount -t overlay overlay -o lowerdir=/workspace_lower,upperdir=/workspace_upper,workdir=/workspace_work /workspace && exec sleep infinity"
+      "command -v fuse-overlayfs >/dev/null 2>&1 || apk add --no-cache -q fuse-overlayfs 2>/dev/null; mkdir -p /workspace && fuse-overlayfs -o lowerdir=/workspace_lower,upperdir=/workspace_upper,workdir=/workspace_work /workspace && exec sleep infinity"
     ]
 
     case System.cmd("podman", args, stderr_to_stdout: true) do
       {_output, 0} ->
-        # Verify the container is actually running
-        Process.sleep(500)
-        case System.cmd("podman", ["inspect", "--format", "{{.State.Running}}", state.container_name], stderr_to_stdout: true) do
-          {"true\n", 0} ->
+        # Wait for container to finish setup (fuse-overlayfs install + mount)
+        case wait_for_container(state.container_name, 10) do
+          :running ->
             {:ok, %{state | status: :ready, overlay_method: :overlay}}
 
-          _ ->
-            # Container started but overlay mount failed, it exited
+          :exited ->
             System.cmd("podman", ["rm", "-f", state.container_name], stderr_to_stdout: true)
             {:error, "container exited (overlay mount likely failed)"}
         end
@@ -344,6 +343,19 @@ defmodule Orchid.Sandbox do
 
       {output, _code} ->
         {:error, "podman fallback failed: #{String.trim(output)}"}
+    end
+  end
+
+  defp wait_for_container(container_name, retries) when retries > 0 do
+    Process.sleep(1_000)
+
+    case System.cmd("podman", ["inspect", "--format", "{{.State.Running}}", container_name],
+           stderr_to_stdout: true
+         ) do
+      {"true\n", 0} -> :running
+      {"false\n", 0} -> :exited
+      _ when retries > 1 -> wait_for_container(container_name, retries - 1)
+      _ -> :exited
     end
   end
 
@@ -376,24 +388,28 @@ defmodule Orchid.Sandbox do
     if state.status == :error do
       {:error, "Sandbox is in error state"}
     else
-      port =
-        Port.open(
-          {:spawn_executable, System.find_executable("podman")},
-          [
-            :binary,
-            :exit_status,
-            args: ["exec", "-i", "-w", "/workspace", state.container_name, "sh", "-c", command]
-          ]
-        )
+      # Write stdin data to a temp file and pipe it into podman exec.
+      # Erlang ports can't close just stdin, so we use a shell pipe instead.
+      tmpfile = Path.join(System.tmp_dir!(), "orchid-stdin-#{:erlang.unique_integer([:positive])}")
+      File.write!(tmpfile, stdin_data)
 
-      Port.command(port, stdin_data)
-      Port.command(port, "")
-      # Close stdin by sending EOF — Port doesn't have close_stdin, so we close the port
-      # Actually we need to wait for exit. Send data then collect output.
-      # The trick: close stdin by closing the port's input
-      send(port, {self(), :close})
+      try do
+        args = ["exec", "-i", "-w", "/workspace", state.container_name, "sh", "-c", command]
 
-      collect_port_output(port, "")
+        port =
+          Port.open(
+            {:spawn_executable, System.find_executable("sh")},
+            [
+              :binary,
+              :exit_status,
+              args: ["-c", "cat #{escape(tmpfile)} | podman #{Enum.map_join(args, " ", &escape/1)}"]
+            ]
+          )
+
+        collect_port_output(port, "")
+      after
+        File.rm(tmpfile)
+      end
     end
   end
 
@@ -409,7 +425,7 @@ defmodule Orchid.Sandbox do
         {:ok, "Exit code #{code}:\n#{acc}"}
     after
       30_000 ->
-        Port.close(port)
+        try do Port.close(port) catch _, _ -> :ok end
         {:error, "Timed out waiting for command"}
     end
   end
