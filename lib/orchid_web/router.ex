@@ -5,9 +5,27 @@ defmodule OrchidWeb.Router do
   pipeline :browser do
     plug(:accepts, ["html"])
     plug(:fetch_session)
+    plug(OrchidWeb.Plugs.PasswordGate)
     plug(:put_root_layout, html: {OrchidWeb.Layouts, :root})
     plug(:protect_from_forgery)
     plug(:put_secure_browser_headers)
+  end
+
+  pipeline :auth do
+    plug(:accepts, ["html"])
+    plug(:fetch_session)
+    plug(:put_root_layout, html: {OrchidWeb.Layouts, :root})
+    plug(:protect_from_forgery)
+    plug(:put_secure_browser_headers)
+  end
+
+  scope "/", OrchidWeb do
+    pipe_through(:auth)
+
+    get("/login", PasswordController, :login)
+    post("/login", PasswordController, :verify)
+    get("/setup-password", PasswordController, :setup)
+    post("/setup-password", PasswordController, :create_password)
   end
 
   scope "/", OrchidWeb do
