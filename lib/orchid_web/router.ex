@@ -16,5 +16,6 @@ defmodule OrchidWeb.Router do
     live("/", AgentLive, :index)
     live("/agent/:id", AgentLive, :show)
     live("/prompts", PromptsLive, :index)
+    live("/settings", SettingsLive, :index)
   end
 end

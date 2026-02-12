@@ -8,7 +8,7 @@ defmodule Orchid.LLM do
   - :anthropic - Direct API calls (pay per token, needs ANTHROPIC_API_KEY)
   """
 
-  alias Orchid.LLM.{Anthropic, OAuth, CLI, Gemini}
+  alias Orchid.LLM.{Anthropic, OAuth, CLI, Gemini, Cerebras}
 
   @doc """
   Send a chat request to the configured LLM provider.
@@ -20,6 +20,7 @@ defmodule Orchid.LLM do
       :oauth -> OAuth.chat(config, context)
       :anthropic -> Anthropic.chat(config, context)
       :gemini -> Gemini.chat(config, context)
+      :cerebras -> Cerebras.chat(config, context)
       provider -> {:error, {:unsupported_provider, provider}}
     end
   end
@@ -34,6 +35,7 @@ defmodule Orchid.LLM do
       :oauth -> OAuth.chat_stream(config, context, callback)
       :anthropic -> Anthropic.chat_stream(config, context, callback)
       :gemini -> Gemini.chat_stream(config, context, callback)
+      :cerebras -> Cerebras.chat_stream(config, context, callback)
       provider -> {:error, {:unsupported_provider, provider}}
     end
   end
@@ -50,12 +52,13 @@ defmodule Orchid.LLM do
   end
 
   @gemini_models [:gemini_pro, :gemini_flash, :gemini_flash_image]
+  @cerebras_models [:llama_3_1_8b, :llama_3_3_70b, :gpt_oss_120b, :qwen_3_32b, :qwen_3_235b, :zai_glm_4_7]
 
   defp resolve_provider(config) do
-    if config[:model] in @gemini_models do
-      :gemini
-    else
-      config[:provider] || :cli
+    cond do
+      config[:model] in @gemini_models -> :gemini
+      config[:model] in @cerebras_models -> :cerebras
+      true -> config[:provider] || :cli
     end
   end
 end

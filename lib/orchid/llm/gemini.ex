@@ -17,11 +17,11 @@ defmodule Orchid.LLM.Gemini do
   Send a chat request to Gemini.
   """
   def chat(config, context) do
-    api_key = config[:api_key] || System.get_env("GEMINI_API_KEY")
+    api_key = config[:api_key] || Orchid.Object.get_fact_value("gemini_api_key") || System.get_env("GEMINI_API_KEY")
 
-    unless api_key do
-      raise "GEMINI_API_KEY not set"
-    end
+    if is_nil(api_key) do
+      {:error, {:api_key_missing, "GEMINI_API_KEY not set. Add it in Settings > Facts as 'gemini_api_key', or set the GEMINI_API_KEY env var."}}
+    else
 
     model = resolve_model(config[:model])
     url = "#{@base_url}/#{model}:generateContent"
@@ -50,17 +50,18 @@ defmodule Orchid.LLM.Gemini do
         Logger.error("Gemini request failed: #{inspect(reason)}")
         {:error, reason}
     end
+    end
   end
 
   @doc """
   Send a streaming chat request to Gemini.
   """
   def chat_stream(config, context, callback) do
-    api_key = config[:api_key] || System.get_env("GEMINI_API_KEY")
+    api_key = config[:api_key] || Orchid.Object.get_fact_value("gemini_api_key") || System.get_env("GEMINI_API_KEY")
 
-    unless api_key do
-      raise "GEMINI_API_KEY not set"
-    end
+    if is_nil(api_key) do
+      {:error, {:api_key_missing, "GEMINI_API_KEY not set. Add it in Settings > Facts as 'gemini_api_key', or set the GEMINI_API_KEY env var."}}
+    else
 
     model = resolve_model(config[:model])
     url = "#{@base_url}/#{model}:streamGenerateContent?alt=sse"
@@ -100,6 +101,7 @@ defmodule Orchid.LLM.Gemini do
         Process.delete(:gemini_acc)
         IO.puts("[Gemini] stream request failed: #{inspect(reason)}")
         {:error, reason}
+    end
     end
   end
 

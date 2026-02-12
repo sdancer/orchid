@@ -11,7 +11,7 @@ defmodule Orchid.Object do
 
   alias Orchid.Store
 
-  @type object_type :: :file | :artifact | :markdown | :function | :prompt | :project | :goal | :agent_template
+  @type object_type :: :file | :artifact | :markdown | :function | :prompt | :project | :goal | :agent_template | :fact
   @type t :: %__MODULE__{
           id: String.t(),
           type: object_type(),
@@ -47,7 +47,7 @@ defmodule Orchid.Object do
   - `:metadata` - additional metadata map
   """
   def create(type, name, content, opts \\ [])
-      when type in [:file, :artifact, :markdown, :function, :prompt, :project, :goal, :agent_template] do
+      when type in [:file, :artifact, :markdown, :function, :prompt, :project, :goal, :agent_template, :fact] do
     now = DateTime.utc_now()
 
     object = %__MODULE__{
@@ -148,6 +148,30 @@ defmodule Orchid.Object do
   end
 
   @doc """
+  List all fact objects.
+  """
+  def list_facts do
+    list() |> Enum.filter(fn obj -> obj.type == :fact end)
+  end
+
+  @doc """
+  Find a fact by its name.
+  """
+  def get_fact_by_name(name) do
+    list_facts() |> Enum.find(fn obj -> obj.name == name end)
+  end
+
+  @doc """
+  Get the value (content) of a fact by name, or nil if not found.
+  """
+  def get_fact_value(name) do
+    case get_fact_by_name(name) do
+      nil -> nil
+      fact -> fact.content
+    end
+  end
+
+  @doc """
   Update an object's metadata.
   """
   def update_metadata(id, metadata_updates) do
@@ -222,6 +246,7 @@ defmodule Orchid.Object do
       type == :project -> nil
       type == :goal -> nil
       type == :agent_template -> nil
+      type == :fact -> nil
       true -> detect_from_extension(name)
     end
   end
