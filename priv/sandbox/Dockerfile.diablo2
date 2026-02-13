@@ -1,0 +1,117 @@
+FROM debian:bookworm-slim
+
+# Enable i386 architecture for Wine 32-bit support
+RUN dpkg --add-architecture i386
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+      fuse-overlayfs \
+      git \
+      ripgrep \
+      curl \
+      wget \
+      ca-certificates \
+      sudo \
+      # Wine
+      wine \
+      wine32 \
+      wine64 \
+      # Reverse engineering tools
+      binutils \
+      file \
+      xxd \
+      p7zip-full \
+      innoextract \
+      cabextract \
+      unshield \
+      # Build tools for C decompilation work
+      build-essential \
+      gcc-mingw-w64 \
+      nasm \
+      # X11 virtual framebuffer + automation for headless Wine
+      xvfb \
+      x11-utils \
+      xdotool \
+      # Misc
+      python3 \
+      python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -s /bin/bash agent \
+    && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent
+
+# Install Ghidra headless (for decompilation)
+RUN wget -q -O /tmp/ghidra.zip \
+      "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.3.2_build/ghidra_11.3.2_PUBLIC_20250415.zip" && \
+    apt-get update -qq && apt-get install -y -qq --no-install-recommends unzip default-jre-headless && \
+    rm -rf /var/lib/apt/lists/* && \
+    unzip -q /tmp/ghidra.zip -d /opt && \
+    mv /opt/ghidra_* /opt/ghidra && \
+    ln -s /opt/ghidra/support/analyzeHeadless /usr/local/bin/analyzeHeadless && \
+    rm /tmp/ghidra.zip
+
+# Download Diablo 2 Demo installer (132MB, Blizzard custom installer from 2000)
+RUN mkdir -p /opt/diablo2-demo && \
+    wget -q --show-progress -O /opt/diablo2-demo/DiabloIIDemo.exe \
+      "https://archive.org/download/DiabloIiDemo/DiabloIIDemo.exe" && \
+    ls -lh /opt/diablo2-demo/
+
+# Extract MPQ archives from the installer binary
+COPY extract_mpqs.py /opt/diablo2-demo/
+RUN python3 /opt/diablo2-demo/extract_mpqs.py && \
+    ls -lh /opt/diablo2-demo/mpqs/
+
+# Initialize Wine prefix for agent user
+USER agent
+RUN WINEARCH=win32 WINEPREFIX=/home/agent/.wine wineboot --init 2>/dev/null; true
+
+# Install the game via Wine (the installer extracts game files from embedded MPQs)
+RUN export WINEPREFIX=/home/agent/.wine && \
+    export WINEARCH=win32 && \
+    export DISPLAY=:99 && \
+    rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null; \
+    sudo Xvfb :99 -screen 0 800x600x16 -ac & \
+    sleep 2 && \
+    wine /opt/diablo2-demo/DiabloIIDemo.exe & \
+    WINE_PID=$! && \
+    # Wait for installer, then click through with Enter + mouse clicks at common button locations
+    sleep 8 && \
+    for i in $(seq 1 15); do \
+      xdotool key Return 2>/dev/null; \
+      xdotool mousemove 400 400 click 1 2>/dev/null; \
+      sleep 3; \
+    done && \
+    wait $WINE_PID 2>/dev/null; \
+    wineserver -k 2>/dev/null; \
+    sudo pkill Xvfb 2>/dev/null; \
+    # Show what got installed
+    echo "=== Game files found ===" && \
+    find /home/agent/.wine/drive_c -type f -name "*.exe" -o -name "*.dll" -o -name "*.mpq" 2>/dev/null | grep -iv windows | head -30; \
+    true
+
+# Copy game files to accessible location (try known install paths)
+RUN for dir in \
+      "/home/agent/.wine/drive_c/Diablo II" \
+      "/home/agent/.wine/drive_c/Program Files/Diablo II" \
+      "/home/agent/.wine/drive_c/Program Files/Diablo II Demo"; do \
+      if [ -d "$dir" ]; then \
+        cp -r "$dir" /home/agent/diablo2 && \
+        echo "Game installed at: $dir" && \
+        break; \
+      fi; \
+    done; \
+    # Fallback: create dir with extracted MPQs for manual analysis
+    if [ ! -d /home/agent/diablo2 ]; then \
+      mkdir -p /home/agent/diablo2 && \
+      cp /opt/diablo2-demo/mpqs/*.mpq /home/agent/diablo2/ && \
+      echo "No Wine install found. MPQ archives copied to /home/agent/diablo2/"; \
+    fi && \
+    ls -lh /home/agent/diablo2/
+
+# Helper scripts
+COPY --chown=agent:agent run-diablo2.sh /home/agent/bin/run-diablo2.sh
+RUN chmod +x /home/agent/bin/run-diablo2.sh
+
+ENV PATH="/home/agent/bin:${PATH}"
+
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

@@ -96,6 +96,37 @@ do_inspect() {
   elixir --name "inspect-$$@127.0.0.1" --cookie "$cookie" priv/scripts/inspect_agent.exs "$@"
 }
 
+do_shell() {
+  local project_id="$1"
+  if [ -z "$project_id" ]; then
+    # List available containers
+    echo "Running sandbox containers:"
+    podman ps --filter "name=orchid-project-" --format "  {{.Names}} ({{.Status}})"
+    echo ""
+    echo "Usage: ./orchid shell <project_id>"
+    echo "  e.g.: ./orchid shell Pyj_kPs17gjSP9qv"
+    return 1
+  fi
+  local container="orchid-project-${project_id}"
+  if ! podman inspect "$container" >/dev/null 2>&1; then
+    echo "Container $container not found"
+    return 1
+  fi
+  echo "Entering shell in $container (/workspace)..."
+  podman exec -it -w /workspace "$container" bash
+}
+
+do_exec() {
+  local project_id="$1"
+  shift
+  if [ -z "$project_id" ] || [ $# -eq 0 ]; then
+    echo "Usage: ./orchid exec <project_id> <command...>"
+    return 1
+  fi
+  local container="orchid-project-${project_id}"
+  podman exec -w /workspace "$container" sh -c "$*"
+}
+
 case "${1:-}" in
   start)   do_start ;;
   stop)    do_stop ;;
@@ -104,8 +135,10 @@ case "${1:-}" in
   status)  do_status ;;
   log)     do_log ;;
   inspect) shift; do_inspect "$@" ;;
+  shell)   shift; do_shell "$@" ;;
+  exec)    shift; do_exec "$@" ;;
   *)
-    echo "Usage: ./orchid {start|stop|restart|reset|inspect [agent_id]|status|log}"
+    echo "Usage: ./orchid {start|stop|restart|reset|inspect|shell|exec|status|log}"
     exit 1
     ;;
 esac
