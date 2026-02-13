@@ -13,3 +13,5 @@ config :orchid, OrchidWeb.Endpoint,
   ]
 
 config :logger, :console, format: "[$level] $message\n"
+
+config :phoenix, :logger, false

@@ -96,6 +96,20 @@ defmodule Orchid.Agent do
   end
 
   @doc """
+  Retry the last LLM call without adding a new message.
+  Use when the agent failed mid-turn and the last message is already in history.
+  """
+  def retry(agent_id, callback \\ fn _chunk -> :ok end) do
+    caller = self()
+    cast(agent_id, {:retry, {callback, caller}})
+    receive do
+      {:agent_done, ^agent_id, result} -> result
+    after
+      660_000 -> {:error, :timeout}
+    end
+  end
+
+  @doc """
   Get the current state of an agent.
   Optional timeout (ms or :infinity, default :infinity).
   """
@@ -179,6 +193,7 @@ defmodule Orchid.Agent do
         state
       end
 
+    Logger.info("Agent #{id} started, project=#{inspect(state.project_id)}, provider=#{config[:provider]}, model=#{config[:model]}")
     Store.put_agent_state(id, state)
     {:ok, state}
   end
@@ -231,6 +246,38 @@ defmodule Orchid.Agent do
   end
 
   @impl true
+  def handle_cast({:retry, notify}, state) do
+    # Re-run the LLM without adding a new message (last message already in history)
+    state = %{state | status: :thinking}
+    Store.put_agent_state(state.id, state)
+
+    agent_pid = self()
+    agent_id = state.id
+
+    {callback, caller} =
+      case notify do
+        {cb, caller_pid} -> {cb, caller_pid}
+        nil -> {fn _chunk -> :ok end, nil}
+      end
+
+    Task.start(fn ->
+      result =
+        case run_agent_loop_streaming(state, callback, 10, agent_pid) do
+          {:ok, response, new_state} ->
+            send(agent_pid, {:work_done, new_state, {:ok, response}})
+            {:ok, response}
+
+          {:error, reason, new_state} ->
+            send(agent_pid, {:work_done, new_state, {:error, reason}})
+            {:error, reason}
+        end
+
+      if caller, do: send(caller, {:agent_done, agent_id, result})
+    end)
+
+    {:noreply, state}
+  end
+
   def handle_cast({:run, message, notify}, state) do
     state = %{state | status: :thinking}
     state = add_message(state, :user, message)
@@ -247,7 +294,7 @@ defmodule Orchid.Agent do
 
     Task.start(fn ->
       result =
-        case run_agent_loop_streaming(state, callback) do
+        case run_agent_loop_streaming(state, callback, 10, agent_pid) do
           {:ok, response, new_state} ->
             send(agent_pid, {:work_done, new_state, {:ok, response}})
             {:ok, response}
@@ -264,6 +311,12 @@ defmodule Orchid.Agent do
   end
 
   @impl true
+  def handle_info({:update_status, status}, state) do
+    state = %{state | status: status}
+    Store.put_agent_state(state.id, state)
+    {:noreply, state}
+  end
+
   def handle_info({:work_done, new_state, _result}, _state) do
     new_state = %{new_state | status: :idle}
     Store.put_agent_state(new_state.id, new_state)
@@ -321,19 +374,22 @@ defmodule Orchid.Agent do
     %{state | messages: state.messages ++ [message]}
   end
 
-  defp run_agent_loop_streaming(state, callback, max_iterations \\ 10) do
-    do_run_loop_streaming(state, callback, max_iterations, nil)
+  @max_retries 10
+  @initial_backoff 2_000
+
+  defp run_agent_loop_streaming(state, callback, max_iterations, agent_pid) do
+    do_run_loop_streaming(state, callback, max_iterations, nil, agent_pid)
   end
 
-  defp do_run_loop_streaming(state, _callback, 0, last_response) do
+  defp do_run_loop_streaming(state, _callback, 0, last_response, _agent_pid) do
     {:ok, last_response || "Max iterations reached", state}
   end
 
-  defp do_run_loop_streaming(state, callback, iterations_left, _last_response) do
+  defp do_run_loop_streaming(state, callback, iterations_left, _last_response, agent_pid) do
     context = build_context(state)
     config = build_llm_config(state)
 
-    case LLM.chat_stream(config, context, callback) do
+    case llm_call_with_retry(config, context, callback, agent_pid) do
       {:ok, %{content: content, tool_calls: nil}} ->
         state = add_assistant_message(state, content)
         {:ok, content, state}
@@ -349,10 +405,36 @@ defmodule Orchid.Agent do
             add_message(acc, :tool, result)
           end)
 
-        do_run_loop_streaming(state, callback, iterations_left - 1, content)
+        do_run_loop_streaming(state, callback, iterations_left - 1, content, agent_pid)
 
       {:error, reason} ->
         {:error, reason, state}
+    end
+  end
+
+  defp llm_call_with_retry(config, context, callback, agent_pid) do
+    do_llm_retry(config, context, callback, 0, agent_pid)
+  end
+
+  defp do_llm_retry(config, context, callback, attempt, _agent_pid) when attempt >= @max_retries do
+    LLM.chat_stream(config, context, callback)
+  end
+
+  defp do_llm_retry(config, context, callback, attempt, agent_pid) do
+    case LLM.chat_stream(config, context, callback) do
+      {:ok, _} = success ->
+        success
+
+      {:error, {:api_error, status, _}} when status in [429, 500, 502, 503, 504] ->
+        backoff = min(@initial_backoff * :math.pow(2, attempt) |> round(), 30_000)
+        Logger.warning("Agent LLM call failed (#{status}), retry #{attempt + 1}/#{@max_retries} in #{backoff}ms")
+        if agent_pid, do: send(agent_pid, {:update_status, {:retrying, attempt + 1, @max_retries, status}})
+        Process.sleep(backoff)
+        if agent_pid, do: send(agent_pid, {:update_status, :thinking})
+        do_llm_retry(config, context, callback, attempt + 1, agent_pid)
+
+      {:error, _} = error ->
+        error
     end
   end
 

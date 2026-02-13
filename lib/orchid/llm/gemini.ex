@@ -26,11 +26,12 @@ defmodule Orchid.LLM.Gemini do
         {:ok, %{status: 200, body: response}} ->
           parse_response(response)
 
-        {:ok, %{status: status, body: body}} ->
-          Logger.error("Gemini API error: #{status} - #{inspect(body)}")
-          {:error, {:api_error, status, body}}
+        {:ok, %{status: status, body: resp_body}} ->
+          Logger.error("Gemini API error #{status}: #{inspect(resp_body)}")
+          {:error, {:api_error, status, resp_body}}
 
         {:error, reason} ->
+          Logger.error("Gemini request failed: #{inspect(reason)}")
           {:error, reason}
       end
     end
@@ -65,12 +66,23 @@ defmodule Orchid.LLM.Gemini do
           Logger.info("Gemini: response complete, content=#{String.length(final.content)} chars, tool_calls=#{if tool_calls, do: length(tool_calls), else: 0}")
           {:ok, %{content: final.content, tool_calls: tool_calls}}
 
-        {:ok, %{status: status, body: body}} ->
+        {:ok, %{status: status, body: resp_body}} ->
           Process.delete(:gemini_acc)
-          {:error, {:api_error, status, body}}
+          # Stream mode may leave body empty; try to get any accumulated content
+          error_detail = if resp_body == "" or resp_body == nil do
+            acc_state = Process.get(:gemini_acc, acc)
+            if acc_state.content != "", do: acc_state.content, else: "(empty response body)"
+          else
+            inspect(resp_body)
+          end
+          Logger.error("Gemini API error #{status}: #{error_detail}")
+          log_failed_request(body, status)
+          {:error, {:api_error, status, error_detail}}
 
         {:error, reason} ->
           Process.delete(:gemini_acc)
+          Logger.error("Gemini request failed: #{inspect(reason)}")
+          log_failed_request(body, reason)
           {:error, reason}
       end
     end
@@ -87,6 +99,32 @@ defmodule Orchid.LLM.Gemini do
         parameters: tool.parameters
       }
     end)
+  end
+
+  @failed_request_log "priv/data/gemini_failed_requests.log"
+
+  defp log_failed_request(body, error) do
+    File.mkdir_p!(Path.dirname(@failed_request_log))
+    ts = DateTime.utc_now() |> DateTime.to_string()
+
+    # Summarize the request: message count, tool count, content sizes
+    msg_count = length(body[:contents] || [])
+    tool_count = length(get_in(body, [:tools, Access.at(0), :function_declarations]) || [])
+    system_size = case body[:system_instruction] do
+      %{parts: [%{text: t}]} -> byte_size(t)
+      _ -> 0
+    end
+    body_json = Jason.encode!(body, pretty: true)
+    body_size = byte_size(body_json)
+
+    entry = """
+    === #{ts} error=#{inspect(error)} ===
+    messages=#{msg_count} tools=#{tool_count} system_prompt=#{system_size}B body=#{body_size}B
+    #{body_json}
+    """
+
+    File.write!(@failed_request_log, entry, [:append])
+    Logger.warning("Gemini: failed request logged to #{@failed_request_log} (#{body_size}B)")
   end
 
   # Private functions
@@ -219,20 +257,43 @@ defmodule Orchid.LLM.Gemini do
           %{role: "model", parts: parts}
 
         :tool ->
-          # Tool results go as user messages with functionResponse parts
+          # Tool results — will be merged with adjacent :tool messages below
           %{
             role: "user",
             parts: [
               %{
                 functionResponse: %{
-                  name: msg.content[:tool_name] || msg.content.tool_use_id,
-                  response: %{result: msg.content.content}
+                  name: msg.content[:tool_name] || msg.content[:tool_use_id],
+                  response: %{result: msg.content[:content] || ""}
                 }
               }
             ]
           }
       end
     end)
+    |> merge_consecutive_roles()
+  end
+
+  # Gemini requires strictly alternating model/user turns.
+  # Merge consecutive messages with the same role into one.
+  defp merge_consecutive_roles(messages) do
+    messages
+    |> Enum.chunk_while(
+      nil,
+      fn msg, acc ->
+        case acc do
+          nil -> {:cont, msg}
+          %{role: role} when role == msg.role ->
+            {:cont, %{acc | parts: acc.parts ++ msg.parts}}
+          _ ->
+            {:cont, acc, msg}
+        end
+      end,
+      fn
+        nil -> {:cont, []}
+        acc -> {:cont, acc, nil}
+      end
+    )
   end
 
   defp parse_response(response) do

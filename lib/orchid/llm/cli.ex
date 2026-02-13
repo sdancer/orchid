@@ -61,17 +61,19 @@ defmodule Orchid.LLM.CLI do
   end
 
   defp build_shell_command(args, config) do
-    claude_path = System.find_executable("claude") || "claude"
-    escaped_args = Enum.map(args, &shell_escape/1)
-    cmd = "#{claude_path} #{Enum.join(escaped_args, " ")}"
-
     case config[:project_id] do
       nil ->
-        cmd
+        # No project — run claude on host
+        claude_path = System.find_executable("claude") || "claude"
+        escaped_args = Enum.map(args, &shell_escape/1)
+        "#{claude_path} #{Enum.join(escaped_args, " ")}"
 
       project_id ->
-        dir = Orchid.Project.files_path(project_id) |> Path.expand()
-        "cd #{shell_escape(dir)} && #{cmd}"
+        # Run claude inside the project's sandbox container
+        container = "orchid-project-#{project_id}"
+        escaped_args = Enum.map(args, &shell_escape/1)
+        inner_cmd = "cd /workspace && claude #{Enum.join(escaped_args, " ")}"
+        "podman exec #{container} sh -c #{shell_escape(inner_cmd)}"
     end
   end
 

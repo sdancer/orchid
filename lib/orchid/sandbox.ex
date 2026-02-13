@@ -1,8 +1,9 @@
 defmodule Orchid.Sandbox do
   @moduledoc """
-  Sandbox GenServer — one per project.
-  Manages a Podman container with OverlayFS for isolated file access.
-  Registered in Orchid.Registry as {:sandbox, project_id}.
+  Sandbox — one Podman container per project.
+  GenServer manages container lifecycle (start/stop/reset).
+  Data operations (exec, read, write, etc.) bypass GenServer entirely —
+  they run podman exec directly, so long commands never block other operations.
   """
   use GenServer
   require Logger
@@ -21,7 +22,31 @@ defmodule Orchid.Sandbox do
     :status
   ]
 
-  # Client API
+  # ── Deterministic path helpers (no GenServer needed) ──
+
+  def container_name(project_id), do: "orchid-project-#{project_id}"
+
+  defp paths(project_id) do
+    data_dir = Project.data_dir() |> Path.expand()
+    lower = Project.files_path(project_id) |> Path.expand()
+    base = Path.join([data_dir, "sandboxes", project_id])
+
+    %{
+      lower: lower,
+      upper: Path.join(base, "upper"),
+      work: Path.join(base, "work"),
+      merged: Path.join(base, "merged")
+    }
+  end
+
+  defp overlay_method(project_id) do
+    case Registry.lookup(Orchid.Registry, {:sandbox, project_id}) do
+      [{_pid, method}] -> method
+      [] -> nil
+    end
+  end
+
+  # ── Client API: Lifecycle (goes through GenServer) ──
 
   def start_link(project_id) do
     GenServer.start_link(__MODULE__, project_id,
@@ -37,32 +62,11 @@ defmodule Orchid.Sandbox do
     }
   end
 
-  def exec(project_id, command, opts \\ []) do
-    call(project_id, {:exec, command, opts})
-  end
-
-  def read_file(project_id, path) do
-    call(project_id, {:read_file, path})
-  end
-
-  def write_file(project_id, path, content) do
-    call(project_id, {:write_file, path, content})
-  end
-
-  def edit_file(project_id, path, old_string, new_string) do
-    call(project_id, {:edit_file, path, old_string, new_string})
-  end
-
-  def list_files(project_id, path \\ "/workspace") do
-    call(project_id, {:list_files, path})
-  end
-
-  def grep_files(project_id, pattern, path \\ "/workspace", opts \\ []) do
-    call(project_id, {:grep_files, pattern, path, opts})
-  end
-
   def reset(project_id) do
-    call(project_id, :reset)
+    case Registry.lookup(Orchid.Registry, {:sandbox, project_id}) do
+      [{pid, _}] -> GenServer.call(pid, :reset, 120_000)
+      [] -> {:error, :sandbox_not_found}
+    end
   end
 
   def stop(project_id) do
@@ -79,38 +83,120 @@ defmodule Orchid.Sandbox do
     end
   end
 
-  # GenServer callbacks
+  # ── Client API: Data operations (bypass GenServer) ──
+
+  def exec(project_id, command, opts \\ []) do
+    case overlay_method(project_id) do
+      nil -> {:error, :sandbox_not_found}
+      _method -> podman_exec(container_name(project_id), command, opts[:timeout] || 30_000)
+    end
+  end
+
+  def read_file(project_id, path) do
+    case overlay_method(project_id) do
+      nil -> {:error, :sandbox_not_found}
+      :overlay -> podman_exec(container_name(project_id), "cat #{escape(path)}")
+      :union ->
+        p = paths(project_id)
+        rel = workspace_relative(path)
+        case Overlay.union_read(rel, p.upper, p.lower) do
+          {:ok, content} -> {:ok, content}
+          {:error, reason} -> {:error, "Failed to read #{path}: #{reason}"}
+        end
+    end
+  end
+
+  def write_file(project_id, path, content) do
+    case overlay_method(project_id) do
+      nil -> {:error, :sandbox_not_found}
+      :overlay ->
+        podman_exec_stdin(container_name(project_id), "mkdir -p $(dirname #{escape(path)}) && cat > #{escape(path)}", content)
+      :union ->
+        p = paths(project_id)
+        rel = workspace_relative(path)
+        case Overlay.union_write(rel, content, p.upper) do
+          :ok -> {:ok, "Written to #{path}"}
+          {:error, reason} -> {:error, "Failed to write #{path}: #{reason}"}
+        end
+    end
+  end
+
+  def edit_file(project_id, path, old_string, new_string) do
+    with {:ok, content} <- read_file(project_id, path) do
+      if String.contains?(content, old_string) do
+        count = length(String.split(content, old_string)) - 1
+
+        if count > 1 do
+          {:error, "old_string appears #{count} times - must be unique. Add more context."}
+        else
+          new_content = String.replace(content, old_string, new_string, global: false)
+
+          case write_file(project_id, path, new_content) do
+            {:ok, _} -> {:ok, "Successfully edited #{path}"}
+            error -> error
+          end
+        end
+      else
+        {:error, "old_string not found in #{path}"}
+      end
+    end
+  end
+
+  def list_files(project_id, path \\ "/workspace") do
+    case overlay_method(project_id) do
+      nil -> {:error, :sandbox_not_found}
+      :overlay -> podman_exec(container_name(project_id), "ls -la #{escape(path)}")
+      :union ->
+        p = paths(project_id)
+        rel = workspace_relative(path)
+        Overlay.union_list(rel, p.upper, p.lower)
+    end
+  end
+
+  def grep_files(project_id, pattern, path \\ "/workspace", opts \\ []) do
+    case overlay_method(project_id) do
+      nil -> {:error, :sandbox_not_found}
+      :overlay ->
+        glob = opts[:glob]
+        cmd = "rg -n --no-heading #{escape(pattern)} #{escape(path)}"
+        cmd = if glob, do: cmd <> " --glob #{escape(glob)}", else: cmd
+        podman_exec(container_name(project_id), cmd)
+      :union ->
+        p = paths(project_id)
+        rel = workspace_relative(path)
+        Overlay.union_grep(pattern, rel, p.upper, p.lower, opts)
+    end
+  end
+
+  # ── GenServer callbacks ──
 
   @impl true
   def init(project_id) do
-    data_dir = Project.data_dir() |> Path.expand()
-    lower = Project.files_path(project_id) |> Path.expand()
-    base = Path.join([data_dir, "sandboxes", project_id])
-    upper = Path.join(base, "upper")
-    work = Path.join(base, "work")
-    merged = Path.join(base, "merged")
+    p = paths(project_id)
 
-    File.mkdir_p!(upper)
-    File.mkdir_p!(work)
-    File.mkdir_p!(merged)
+    File.mkdir_p!(p.upper)
+    File.mkdir_p!(p.work)
+    File.mkdir_p!(p.merged)
     Project.ensure_dir(project_id)
 
     image = get_image()
-    container_name = "orchid-project-#{project_id}"
+    cname = container_name(project_id)
 
     state = %__MODULE__{
       project_id: project_id,
-      container_name: container_name,
-      lower_path: lower,
-      upper_path: upper,
-      work_path: work,
-      merged_path: merged,
+      container_name: cname,
+      lower_path: p.lower,
+      upper_path: p.upper,
+      work_path: p.work,
+      merged_path: p.merged,
       image: image,
       overlay_method: nil,
       status: :starting
     }
 
     state = start_container(state)
+    # Store overlay_method in Registry value so data ops can read it without GenServer
+    Registry.update_value(Orchid.Registry, {:sandbox, project_id}, fn _ -> state.overlay_method end)
     {:ok, state}
   end
 
@@ -119,133 +205,10 @@ defmodule Orchid.Sandbox do
     {:reply, %{status: state.status, container_name: state.container_name, overlay_method: state.overlay_method}, state}
   end
 
-  def handle_call({:exec, command, opts}, _from, state) do
-    timeout = opts[:timeout] || 30_000
-    result = podman_exec(state, command, timeout)
-    {:reply, result, state}
-  end
-
-  def handle_call({:read_file, path}, _from, state) do
-    result =
-      case state.overlay_method do
-        :overlay ->
-          podman_exec(state, "cat #{escape(path)}")
-
-        :union ->
-          rel = workspace_relative(path)
-          case Overlay.union_read(rel, state.upper_path, state.lower_path) do
-            {:ok, content} -> {:ok, content}
-            {:error, reason} -> {:error, "Failed to read #{path}: #{reason}"}
-          end
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:write_file, path, content}, _from, state) do
-    result =
-      case state.overlay_method do
-        :overlay ->
-          podman_exec_stdin(state, "mkdir -p $(dirname #{escape(path)}) && cat > #{escape(path)}", content)
-
-        :union ->
-          rel = workspace_relative(path)
-          case Overlay.union_write(rel, content, state.upper_path) do
-            :ok -> {:ok, "Written to #{path}"}
-            {:error, reason} -> {:error, "Failed to write #{path}: #{reason}"}
-          end
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:edit_file, path, old_string, new_string}, _from, state) do
-    # Read, replace, write back
-    read_result =
-      case state.overlay_method do
-        :overlay -> podman_exec(state, "cat #{escape(path)}")
-        :union ->
-          rel = workspace_relative(path)
-          case Overlay.union_read(rel, state.upper_path, state.lower_path) do
-            {:ok, content} -> {:ok, content}
-            {:error, reason} -> {:error, "Failed to read #{path}: #{reason}"}
-          end
-      end
-
-    result =
-      case read_result do
-        {:ok, content} ->
-          if String.contains?(content, old_string) do
-            count = length(String.split(content, old_string)) - 1
-
-            if count > 1 do
-              {:error, "old_string appears #{count} times - must be unique. Add more context."}
-            else
-              new_content = String.replace(content, old_string, new_string, global: false)
-
-              write_result =
-                case state.overlay_method do
-                  :overlay ->
-                    podman_exec_stdin(state, "cat > #{escape(path)}", new_content)
-
-                  :union ->
-                    rel = workspace_relative(path)
-                    case Overlay.union_write(rel, new_content, state.upper_path) do
-                      :ok -> {:ok, "ok"}
-                      {:error, reason} -> {:error, "Failed to write #{path}: #{reason}"}
-                    end
-                end
-
-              case write_result do
-                {:ok, _} -> {:ok, "Successfully edited #{path}"}
-                error -> error
-              end
-            end
-          else
-            {:error, "old_string not found in #{path}"}
-          end
-
-        error ->
-          error
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:list_files, path}, _from, state) do
-    result =
-      case state.overlay_method do
-        :overlay ->
-          podman_exec(state, "ls -la #{escape(path)}")
-
-        :union ->
-          rel = workspace_relative(path)
-          Overlay.union_list(rel, state.upper_path, state.lower_path)
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:grep_files, pattern, path, opts}, _from, state) do
-    result =
-      case state.overlay_method do
-        :overlay ->
-          glob = opts[:glob]
-          cmd = "rg -n --no-heading #{escape(pattern)} #{escape(path)}"
-          cmd = if glob, do: cmd <> " --glob #{escape(glob)}", else: cmd
-          podman_exec(state, cmd)
-
-        :union ->
-          rel = workspace_relative(path)
-          Overlay.union_grep(pattern, rel, state.upper_path, state.lower_path, opts)
-      end
-
-    {:reply, result, state}
-  end
-
   def handle_call(:reset, _from, state) do
     destroy_container(state)
     new_state = start_container(%{state | status: :starting})
+    Registry.update_value(Orchid.Registry, {:sandbox, state.project_id}, fn _ -> new_state.overlay_method end)
     {:reply, {:ok, %{status: new_state.status}}, new_state}
   end
 
@@ -255,21 +218,38 @@ defmodule Orchid.Sandbox do
     :ok
   end
 
-  # Private
-
-  defp call(project_id, msg) do
-    case Registry.lookup(Orchid.Registry, {:sandbox, project_id}) do
-      [{pid, _}] -> GenServer.call(pid, msg, 60_000)
-      [] -> {:error, :sandbox_not_found}
-    end
-  end
+  # ── Private: Container lifecycle ──
 
   defp get_image do
-    Orchid.Object.get_fact_value("sandbox_image") || "alpine:latest"
+    Orchid.Object.get_fact_value("sandbox_image") || "orchid-sandbox:latest"
+  end
+
+  defp claude_mounts do
+    home = System.user_home!()
+    claude_bin = Path.join([home, ".local", "share", "claude", "versions"])
+
+    claude_path =
+      case File.read_link(Path.join([home, ".local", "bin", "claude"])) do
+        {:ok, target} -> target
+        _ ->
+          case File.ls(claude_bin) do
+            {:ok, versions} ->
+              versions |> Enum.sort(:desc) |> List.first() |> then(&Path.join(claude_bin, &1))
+            _ -> nil
+          end
+      end
+
+    creds = Path.join([home, ".claude", ".credentials.json"])
+    settings = Path.join([home, ".claude", "settings.json"])
+
+    mounts = []
+    mounts = if claude_path && File.exists?(claude_path), do: mounts ++ ["-v", "#{claude_path}:/usr/local/bin/claude:ro"], else: mounts
+    mounts = if File.exists?(creds), do: mounts ++ ["-v", "#{creds}:/root/.claude/.credentials.json:ro"], else: mounts
+    mounts = if File.exists?(settings), do: mounts ++ ["-v", "#{settings}:/root/.claude/settings.json:ro"], else: mounts
+    mounts
   end
 
   defp start_container(state) do
-    # Try primary approach: podman with in-container overlay mount
     case try_overlay_container(state) do
       {:ok, new_state} ->
         Logger.info("Sandbox project-#{state.project_id}: overlay container started")
@@ -290,7 +270,6 @@ defmodule Orchid.Sandbox do
   end
 
   defp try_overlay_container(state) do
-    # First ensure any old container is removed
     System.cmd("podman", ["rm", "-f", state.container_name], stderr_to_stdout: true)
 
     args = [
@@ -300,19 +279,18 @@ defmodule Orchid.Sandbox do
       "--device", "/dev/fuse",
       "-v", "#{state.lower_path}:/workspace_lower:ro",
       "-v", "#{state.upper_path}:/workspace_upper",
-      "-v", "#{state.work_path}:/workspace_work",
+      "-v", "#{state.work_path}:/workspace_work"
+    ] ++ claude_mounts() ++ [
       state.image,
       "sh", "-c",
-      "command -v fuse-overlayfs >/dev/null 2>&1 || apk add --no-cache -q fuse-overlayfs 2>/dev/null; mkdir -p /workspace && fuse-overlayfs -o lowerdir=/workspace_lower,upperdir=/workspace_upper,workdir=/workspace_work /workspace && exec sleep infinity"
+      "mkdir -p /workspace && fuse-overlayfs -o lowerdir=/workspace_lower,upperdir=/workspace_upper,workdir=/workspace_work /workspace && exec sleep infinity"
     ]
 
     case System.cmd("podman", args, stderr_to_stdout: true) do
       {_output, 0} ->
-        # Wait for container to finish setup (fuse-overlayfs install + mount)
         case wait_for_container(state.container_name, 10) do
           :running ->
             {:ok, %{state | status: :ready, overlay_method: :overlay}}
-
           :exited ->
             System.cmd("podman", ["rm", "-f", state.container_name], stderr_to_stdout: true)
             {:error, "container exited (overlay mount likely failed)"}
@@ -330,7 +308,8 @@ defmodule Orchid.Sandbox do
       "run", "-d",
       "--name", state.container_name,
       "-v", "#{state.lower_path}:/workspace_lower:ro",
-      "-v", "#{state.upper_path}:/workspace:rw",
+      "-v", "#{state.upper_path}:/workspace:rw"
+    ] ++ claude_mounts() ++ [
       state.image,
       "sleep", "infinity"
     ]
@@ -338,7 +317,6 @@ defmodule Orchid.Sandbox do
     case System.cmd("podman", args, stderr_to_stdout: true) do
       {_output, 0} ->
         {:ok, %{state | status: :ready, overlay_method: :union}}
-
       {output, _code} ->
         {:error, "podman fallback failed: #{String.trim(output)}"}
     end
@@ -361,53 +339,45 @@ defmodule Orchid.Sandbox do
     System.cmd("podman", ["rm", "-f", state.container_name], stderr_to_stdout: true)
   end
 
-  defp podman_exec(state, command, timeout \\ 30_000) do
-    if state.status == :error do
-      {:error, "Sandbox is in error state"}
-    else
-      task =
-        Task.async(fn ->
-          System.cmd("podman", [
-            "exec", "-w", "/workspace",
-            state.container_name,
-            "sh", "-c", command
-          ], stderr_to_stdout: true)
-        end)
+  # ── Private: Command execution (standalone, no GenServer) ──
 
-      case Task.yield(task, timeout) || Task.shutdown(task) do
-        {:ok, {output, 0}} -> {:ok, output}
-        {:ok, {output, code}} -> {:ok, "Exit code #{code}:\n#{output}"}
-        nil -> {:error, "Command timed out after #{timeout}ms"}
-      end
+  defp podman_exec(cname, command, timeout \\ 30_000) do
+    task =
+      Task.async(fn ->
+        System.cmd("podman", [
+          "exec", "-w", "/workspace",
+          cname,
+          "sh", "-c", command
+        ], stderr_to_stdout: true)
+      end)
+
+    case Task.yield(task, timeout) || Task.shutdown(task) do
+      {:ok, {output, 0}} -> {:ok, output}
+      {:ok, {output, code}} -> {:ok, "Exit code #{code}:\n#{output}"}
+      nil -> {:error, "Command timed out after #{timeout}ms"}
     end
   end
 
-  defp podman_exec_stdin(state, command, stdin_data) do
-    if state.status == :error do
-      {:error, "Sandbox is in error state"}
-    else
-      # Write stdin data to a temp file and pipe it into podman exec.
-      # Erlang ports can't close just stdin, so we use a shell pipe instead.
-      tmpfile = Path.join(System.tmp_dir!(), "orchid-stdin-#{:erlang.unique_integer([:positive])}")
-      File.write!(tmpfile, stdin_data)
+  defp podman_exec_stdin(cname, command, stdin_data) do
+    tmpfile = Path.join(System.tmp_dir!(), "orchid-stdin-#{:erlang.unique_integer([:positive])}")
+    File.write!(tmpfile, stdin_data)
 
-      try do
-        args = ["exec", "-i", "-w", "/workspace", state.container_name, "sh", "-c", command]
+    try do
+      args = ["exec", "-i", "-w", "/workspace", cname, "sh", "-c", command]
 
-        port =
-          Port.open(
-            {:spawn_executable, System.find_executable("sh")},
-            [
-              :binary,
-              :exit_status,
-              args: ["-c", "cat #{escape(tmpfile)} | podman #{Enum.map_join(args, " ", &escape/1)}"]
-            ]
-          )
+      port =
+        Port.open(
+          {:spawn_executable, System.find_executable("sh")},
+          [
+            :binary,
+            :exit_status,
+            args: ["-c", "cat #{escape(tmpfile)} | podman #{Enum.map_join(args, " ", &escape/1)}"]
+          ]
+        )
 
-        collect_port_output(port, "")
-      after
-        File.rm(tmpfile)
-      end
+      collect_port_output(port, "")
+    after
+      File.rm(tmpfile)
     end
   end
 
@@ -422,7 +392,7 @@ defmodule Orchid.Sandbox do
       {^port, {:exit_status, code}} ->
         {:ok, "Exit code #{code}:\n#{acc}"}
     after
-      30_000 ->
+      300_000 ->
         try do Port.close(port) catch _, _ -> :ok end
         {:error, "Timed out waiting for command"}
     end

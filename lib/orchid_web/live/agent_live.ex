@@ -862,6 +862,7 @@ defmodule OrchidWeb.AgentLive do
                       <option value="oauth" selected={@template_provider == :oauth}>API</option>
                       <option value="gemini" selected={@template_provider == :gemini}>Gemini</option>
                       <option value="cerebras" selected={@template_provider == :cerebras}>Cerebras</option>
+                      <option value="openrouter" selected={@template_provider == :openrouter}>OpenRouter</option>
                     </select>
                   </div>
                   <div style="flex: 1;">
@@ -879,6 +880,7 @@ defmodule OrchidWeb.AgentLive do
                       <option value="qwen_3_32b" selected={@template_model == :qwen_3_32b}>Qwen 3 32B</option>
                       <option value="qwen_3_235b" selected={@template_model == :qwen_3_235b}>Qwen 3 235B</option>
                       <option value="zai_glm_4_7" selected={@template_model == :zai_glm_4_7}>Z.ai GLM 4.7</option>
+                      <option value="minimax_m2_5" selected={@template_model == :minimax_m2_5}>MiniMax M2.5</option>
                     </select>
                   </div>
                 </div>
@@ -974,11 +976,13 @@ defmodule OrchidWeb.AgentLive do
                     <span class="streaming-cursor"></span>
                     <%= case @agent_status do %>
                       <% :thinking -> %>
-                        Calling CLI model...
+                        Thinking...
                       <% :executing_tool -> %>
                         Executing tool...
+                      <% {:retrying, attempt, max, status_code} -> %>
+                        API error (<%= status_code %>), retrying <%= attempt %>/<%= max %>...
                       <% status -> %>
-                        <%= status %>
+                        <%= inspect(status) %>
                     <% end %>
                   </div>
                 <% end %>
