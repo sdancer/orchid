@@ -44,6 +44,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:template_provider, :cli)
       |> assign(:template_system_prompt, "")
       |> assign(:template_category, "General")
+      |> assign(:template_use_orchid_tools, false)
       |> assign(:sandbox_statuses, %{})
       |> assign(:agent_status, :idle)
       |> assign(:system_prompt, nil)
@@ -127,7 +128,8 @@ defmodule OrchidWeb.AgentLive do
           name: template.name,
           model: template.metadata[:model],
           provider: template.metadata[:provider],
-          category: template.metadata[:category] || "General"
+          category: template.metadata[:category] || "General",
+          use_orchid_tools: template.metadata[:use_orchid_tools] || false
         }
 
       _ ->
@@ -148,8 +150,11 @@ defmodule OrchidWeb.AgentLive do
             system_prompt: template.content,
             template_id: template_id
           }
-          if template.metadata[:model],
+          config = if template.metadata[:model],
             do: Map.put(config, :model, template.metadata[:model]),
+            else: config
+          if template.metadata[:use_orchid_tools],
+            do: Map.put(config, :use_orchid_tools, true),
             else: config
 
         _ ->
@@ -214,10 +219,10 @@ defmodule OrchidWeb.AgentLive do
 
   def handle_event("show_create_template", _params, socket) do
     # If a template is selected, use its values as starting point
-    {model, provider, prompt} =
+    {model, provider, prompt, use_orchid_tools} =
       case socket.assigns.selected_template do
         nil ->
-          {socket.assigns.model, socket.assigns.provider, ""}
+          {socket.assigns.model, socket.assigns.provider, "", false}
 
         template_id ->
           case Orchid.Object.get(template_id) do
@@ -225,11 +230,12 @@ defmodule OrchidWeb.AgentLive do
               {
                 template.metadata[:model],
                 template.metadata[:provider] || :cli,
-                template.content || ""
+                template.content || "",
+                template.metadata[:use_orchid_tools] || false
               }
 
             _ ->
-              {socket.assigns.model, socket.assigns.provider, ""}
+              {socket.assigns.model, socket.assigns.provider, "", false}
           end
       end
 
@@ -240,7 +246,8 @@ defmodule OrchidWeb.AgentLive do
        template_model: model,
        template_provider: provider,
        template_system_prompt: prompt,
-       template_category: "General"
+       template_category: "General",
+       template_use_orchid_tools: use_orchid_tools
      )}
   end
 
@@ -272,19 +279,27 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, assign(socket, :template_category, category)}
   end
 
+  def handle_event("update_template_orchid_tools", %{"value" => _}, socket) do
+    {:noreply, assign(socket, :template_use_orchid_tools, !socket.assigns.template_use_orchid_tools)}
+  end
+
   def handle_event("create_template", _params, socket) do
     name = String.trim(socket.assigns.template_name)
     prompt = socket.assigns.template_system_prompt
 
     if name != "" do
+      metadata = %{
+        model: socket.assigns.template_model,
+        provider: socket.assigns.template_provider,
+        category: socket.assigns.template_category
+      }
+
+      metadata = if socket.assigns.template_use_orchid_tools,
+        do: Map.put(metadata, :use_orchid_tools, true),
+        else: metadata
+
       {:ok, template} =
-        Orchid.Object.create(:agent_template, name, prompt,
-          metadata: %{
-            model: socket.assigns.template_model,
-            provider: socket.assigns.template_provider,
-            category: socket.assigns.template_category
-          }
-        )
+        Orchid.Object.create(:agent_template, name, prompt, metadata: metadata)
 
       {:noreply,
        assign(socket,
@@ -900,6 +915,12 @@ defmodule OrchidWeb.AgentLive do
                   </div>
                 </div>
                 <div style="margin-bottom: 0.75rem;">
+                  <label style="display: flex; align-items: center; gap: 0.5rem; color: #8b949e; font-size: 0.85rem; cursor: pointer;">
+                    <input type="checkbox" phx-click="update_template_orchid_tools" name="value" value="true" checked={@template_use_orchid_tools} />
+                    Orchestrator (MCP tools only)
+                  </label>
+                </div>
+                <div style="margin-bottom: 0.75rem;">
                   <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">System Prompt</label>
                   <textarea
                     name="prompt"
@@ -934,6 +955,10 @@ defmodule OrchidWeb.AgentLive do
                   <span style="color: #7ee787;"><%= @current_agent_template.category %></span>
                   <span style="color: #6e7681;">•</span>
                   <span style="color: #8b949e;"><%= @current_agent_template.provider %><%= if @current_agent_template.model, do: " / #{@current_agent_template.model}" %></span>
+                  <%= if @current_agent_template.use_orchid_tools do %>
+                    <span style="color: #6e7681;">•</span>
+                    <span style="color: #d2a8ff;">Orchestrator</span>
+                  <% end %>
                   <%= if @system_prompt do %>
                     <button
                       class="btn btn-secondary btn-sm"

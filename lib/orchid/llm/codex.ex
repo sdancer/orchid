@@ -9,6 +9,8 @@ defmodule Orchid.LLM.Codex do
   ## Config options
   - `:model` - model string (default: from codex config, typically "gpt-5.3-codex")
   - `:project_id` - project ID for workspace directory
+  - `:use_orchid_tools` - when true, runs as orchestrator with Orchid MCP tools
+  - `:agent_id` - agent ID (passed to MCP server for tool context)
   """
   require Logger
 
@@ -23,14 +25,17 @@ defmodule Orchid.LLM.Codex do
 
     task = Task.async(fn ->
       cmd = build_shell_command(args, config)
-      Logger.info("Codex exec: #{String.slice(cmd, 0, 200)}")
+      Logger.info("Codex exec: #{String.slice(cmd, 0, 300)}")
       output = :os.cmd(String.to_charlist(cmd))
       raw = to_string(output) |> String.trim()
       Logger.info("Codex raw (#{byte_size(raw)} bytes): #{String.slice(raw, 0, 200)}")
       parse_jsonl(raw)
     end)
 
-    case Task.yield(task, 600_000) || Task.shutdown(task) do
+    # Orchestrators with MCP tools need much longer — they spawn agents and wait
+    timeout = if config[:use_orchid_tools], do: 3_600_000, else: 600_000
+
+    case Task.yield(task, timeout) || Task.shutdown(task) do
       {:ok, ""} ->
         Logger.error("Codex returned empty response")
         {:error, "Codex returned empty response"}
@@ -44,7 +49,7 @@ defmodule Orchid.LLM.Codex do
         end
 
       nil ->
-        Logger.error("Codex timeout after 600s")
+        Logger.error("Codex timeout after #{div(timeout, 1000)}s")
         {:error, :timeout}
     end
   end
@@ -140,14 +145,67 @@ defmodule Orchid.LLM.Codex do
     # Sandbox mode — use full-auto (workspace-write + auto-approve)
     args = args ++ ["--full-auto"]
 
+    # Orchestrators: disable shell tool, only use MCP tools
+    args = if config[:use_orchid_tools] do
+      args ++ ["--disable", "shell_tool"]
+    else
+      args
+    end
+
     # Prompt at the end
     args ++ [prompt]
   end
 
-  defp build_shell_command(args, _config) do
+  defp build_shell_command(args, config) do
     codex_path = System.find_executable("codex") || "codex"
     escaped_args = Enum.map(args, &shell_escape/1)
-    "#{codex_path} #{Enum.join(escaped_args, " ")} 2>&1"
+
+    if config[:use_orchid_tools] && config[:project_id] do
+      # Orchestrator: create temp CODEX_HOME with MCP config
+      codex_home = setup_orchestrator_home(config[:project_id], config[:agent_id])
+      "CODEX_HOME=#{shell_escape(codex_home)} #{codex_path} #{Enum.join(escaped_args, " ")} 2>&1"
+    else
+      "#{codex_path} #{Enum.join(escaped_args, " ")} 2>&1"
+    end
+  end
+
+  # Create a temp CODEX_HOME directory with config.toml that includes the Orchid MCP server.
+  # Codex persists MCP config in config.toml rather than accepting it per-invocation.
+  defp setup_orchestrator_home(project_id, agent_id) do
+    cookie = File.read!(Path.expand("~/.erlang.cookie")) |> String.trim()
+    orchid_root = File.cwd!()
+    script = Path.join(orchid_root, "priv/mcp/orchid_mcp.exs")
+
+    # Build MCP server command args
+    mcp_args = [
+      "--name", "mcp-#{:erlang.unique_integer([:positive])}@127.0.0.1",
+      "--cookie", cookie,
+      script,
+      project_id
+    ] ++ if(agent_id, do: [agent_id], else: [])
+
+    # Format args as TOML array
+    args_toml = "[" <> Enum.map_join(mcp_args, ", ", &"\"#{&1}\"") <> "]"
+
+    # Build config.toml with MCP server and project trust
+    workspace = Orchid.Project.files_path(project_id) |> Path.expand()
+
+    config_toml = """
+    [mcp_servers.orchid]
+    command = "elixir"
+    args = #{args_toml}
+
+    [projects."#{workspace}"]
+    trust_level = "trusted"
+    """
+
+    # Write to temp directory
+    home = Path.join(System.tmp_dir!(), "orchid-codex-#{:erlang.unique_integer([:positive])}")
+    File.mkdir_p!(home)
+    File.write!(Path.join(home, "config.toml"), config_toml)
+
+    Logger.info("Codex orchestrator CODEX_HOME: #{home}")
+    home
   end
 
   defp shell_escape(arg) do
