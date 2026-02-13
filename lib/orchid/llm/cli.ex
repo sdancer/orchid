@@ -34,7 +34,14 @@ defmodule Orchid.LLM.CLI do
     end)
 
     case Task.yield(task, 600_000) || Task.shutdown(task) do
+      {:ok, ""} ->
+        Logger.error("CLI returned empty response")
+        {:error, "CLI returned empty response"}
+
       {:ok, content} ->
+        if String.starts_with?(content, "Error:") or String.starts_with?(content, "error:") do
+          Logger.error("CLI error: #{String.slice(content, 0, 500)}")
+        end
         {:ok, %{content: content, tool_calls: nil}}
 
       nil ->

@@ -298,14 +298,21 @@ defmodule Orchid.Agent do
 
     Task.start(fn ->
       result =
-        case run_agent_loop_streaming(state, callback, 10, agent_pid) do
-          {:ok, response, new_state} ->
-            send(agent_pid, {:work_done, new_state, {:ok, response}})
-            {:ok, response}
+        try do
+          case run_agent_loop_streaming(state, callback, 10, agent_pid) do
+            {:ok, response, new_state} ->
+              send(agent_pid, {:work_done, new_state, {:ok, response}})
+              {:ok, response}
 
-          {:error, reason, new_state} ->
-            send(agent_pid, {:work_done, new_state, {:error, reason}})
-            {:error, reason}
+            {:error, reason, new_state} ->
+              send(agent_pid, {:work_done, new_state, {:error, reason}})
+              {:error, reason}
+          end
+        rescue
+          e ->
+            Logger.error("Agent #{agent_id} run loop crashed: #{Exception.message(e)}")
+            send(agent_pid, {:work_done, state, {:error, Exception.message(e)}})
+            {:error, Exception.message(e)}
         end
 
       if caller, do: send(caller, {:agent_done, agent_id, result})
@@ -330,14 +337,21 @@ defmodule Orchid.Agent do
 
     Task.start(fn ->
       result =
-        case run_agent_loop_streaming(state, callback, 10, agent_pid) do
-          {:ok, response, new_state} ->
-            send(agent_pid, {:work_done, new_state, {:ok, response}})
-            {:ok, response}
+        try do
+          case run_agent_loop_streaming(state, callback, 10, agent_pid) do
+            {:ok, response, new_state} ->
+              send(agent_pid, {:work_done, new_state, {:ok, response}})
+              {:ok, response}
 
-          {:error, reason, new_state} ->
-            send(agent_pid, {:work_done, new_state, {:error, reason}})
-            {:error, reason}
+            {:error, reason, new_state} ->
+              send(agent_pid, {:work_done, new_state, {:error, reason}})
+              {:error, reason}
+          end
+        rescue
+          e ->
+            Logger.error("Agent #{agent_id} run loop crashed: #{Exception.message(e)}")
+            send(agent_pid, {:work_done, state, {:error, Exception.message(e)}})
+            {:error, Exception.message(e)}
         end
 
       if caller, do: send(caller, {:agent_done, agent_id, result})
@@ -356,6 +370,15 @@ defmodule Orchid.Agent do
   def handle_info({:work_done, new_state, result}, state) do
     # Preserve notifications that arrived during the Task's execution
     new_state = %{new_state | status: :idle, notifications: state.notifications}
+
+    case result do
+      {:ok, response} ->
+        preview = (response || "") |> String.slice(0, 150) |> String.replace("\n", " ")
+        Logger.info("Agent #{new_state.id} done: #{preview}")
+      {:error, reason} ->
+        Logger.error("Agent #{new_state.id} failed: #{inspect(reason)}")
+    end
+
     publish_state(new_state)
     Store.put_agent_state(new_state.id, new_state)
 
