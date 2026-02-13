@@ -24,7 +24,8 @@ defmodule Orchid.Seeds do
 
     for {name, prompt, metadata} <- base_templates() do
       case Enum.find(templates, fn t -> t.name == name end) do
-        nil -> :skip
+        nil ->
+          {:ok, _} = Object.create(:agent_template, name, prompt, metadata: metadata)
         existing ->
           if existing.content != prompt, do: Object.update(existing.id, prompt)
           if existing.metadata != metadata, do: Object.update_metadata(existing.id, metadata)
@@ -35,6 +36,7 @@ defmodule Orchid.Seeds do
   defp base_templates do
     [
       coder(),
+      codex_coder(),
       elixir_expert(),
       agent_architect(),
       shell_operator(),
@@ -78,6 +80,21 @@ defmodule Orchid.Seeds do
 
     metadata = %{model: :opus, provider: :cli, category: "Coding"}
     {"Coder", String.trim(prompt), metadata}
+  end
+
+  defp codex_coder do
+    prompt = """
+    You are a general-purpose coding assistant powered by OpenAI Codex. You help users write, debug, refactor, and understand code across any language or framework.
+
+    You have full access to the filesystem and shell. Read code before modifying it. Make minimal, targeted changes. Prefer editing existing files over creating new ones.
+
+    When debugging, investigate root causes rather than patching symptoms. Run tests after making changes. Keep solutions simple and focused.
+
+    Do not over-engineer. Do not add comments, type annotations, or error handling beyond what is needed. Be concise.
+    """
+
+    metadata = %{provider: :codex, category: "Coding"}
+    {"Codex Coder", String.trim(prompt), metadata}
   end
 
   defp elixir_expert do
@@ -299,7 +316,7 @@ defmodule Orchid.Seeds do
     - Keep responses concise. No emojis unless asked.
     """
 
-    metadata = %{model: :sonnet, provider: :cli, category: "Research"}
+    metadata = %{provider: :codex, category: "Research"}
     {"Reverse Engineer", String.trim(prompt), metadata}
   end
 
@@ -336,7 +353,7 @@ defmodule Orchid.Seeds do
     - **Never do the work yourself.** Always spawn an agent. You are the planner, not the executor.
     - **Break down high-level goals** into 2-5 specific subgoals before spawning agents.
     - **One agent per goal.** Spawn with both a template and a goal_id so the agent knows its assignment.
-    - **Choose the right template.** Use "Coder" for general code tasks, "Elixir Expert" for Elixir/Phoenix, "Shell Operator" for infrastructure/DevOps, "Explorer" for read-only research, "Reverse Engineer" for binary analysis/decompilation.
+    - **Choose the right template.** Use "Coder" for general code tasks (Claude), "Codex Coder" for general code tasks (OpenAI Codex), "Elixir Expert" for Elixir/Phoenix, "Shell Operator" for infrastructure/DevOps, "Explorer" for read-only research, "Reverse Engineer" for binary analysis/decompilation.
     - **Don't duplicate work.** Check `goal_list` before creating goals. Skip goals already completed or assigned.
     - **Act immediately.** Don't narrate your plan — execute it with tool calls.
     - **After spawning agents, call `wait` to block until they report back.** Don't end your turn without waiting.
@@ -357,7 +374,7 @@ defmodule Orchid.Seeds do
     {goals list}
     """
 
-    metadata = %{model: :glm_5, provider: :openrouter, category: "Planning"}
+    metadata = %{model: :opus, provider: :oauth, category: "Planning"}
     {"Planner", String.trim(prompt), metadata}
   end
 end

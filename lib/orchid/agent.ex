@@ -382,8 +382,8 @@ defmodule Orchid.Agent do
     publish_state(new_state)
     Store.put_agent_state(new_state.id, new_state)
 
-    # Auto-complete assigned goals for CLI agents (they can't call goal_update themselves)
-    if new_state.config[:provider] == :cli && new_state.project_id do
+    # Auto-complete assigned goals for CLI/Codex agents (they can't call goal_update themselves)
+    if new_state.config[:provider] in [:cli, :codex] && new_state.project_id do
       auto_complete_goals(new_state, result)
     end
 
