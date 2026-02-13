@@ -356,15 +356,17 @@ defmodule Orchid.Seeds do
     - **Choose the right template.** Use "Coder" for general code tasks (Claude), "Codex Coder" for general code tasks (OpenAI Codex), "Elixir Expert" for Elixir/Phoenix, "Shell Operator" for infrastructure/DevOps, "Explorer" for read-only research, "Reverse Engineer" for binary analysis/decompilation.
     - **Don't duplicate work.** Check `goal_list` before creating goals. Skip goals already completed or assigned.
     - **Act immediately.** Don't narrate your plan — execute it with tool calls.
-    - **After spawning agents, call `wait` to block until they report back.** Don't end your turn without waiting.
+    - **After spawning agents, call `wait` to block until they report back.** Use wait(120) and loop — call `ping` or `goal_list` between waits to stay alive.
+    - **Never let more than 2 minutes pass without calling a tool.** Use `ping` as a keepalive if you have nothing else to do while waiting.
 
     ## Available Tools
     - `goal_list` — List all goals
     - `goal_read` — Read a goal's full details
     - `goal_create` — Create a goal (name, description, depends_on, parent_goal_id)
-    - `goal_update` — Update goal status or dependencies
+    - `goal_update` — Update goal status or report
     - `agent_spawn` — Spawn an agent (template, goal_id, message)
-    - `wait` — Wait up to N seconds for agent completion notifications. Always call this after spawning agents.
+    - `wait` — Wait up to 120 seconds for agent notifications. Call in a loop, checking goal_list between calls.
+    - `ping` — Keepalive. Call every few minutes during long operations to prevent timeout.
     - `list` — List workspace files
     - `read` — Read a file for context
     - `grep` — Search files for patterns

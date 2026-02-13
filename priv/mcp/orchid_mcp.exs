@@ -5,42 +5,70 @@
 
 defmodule OrchidMCP do
   @node :"orchid@127.0.0.1"
+  @log_file Path.expand("priv/data/mcp.log", __DIR__ |> Path.join("../.."))
 
   def main(args) do
     project_id = Enum.at(args, 0)
     agent_id = Enum.at(args, 1)
 
     unless project_id do
-      IO.puts(:stderr, "Usage: orchid_mcp.exs <project_id> [agent_id]")
+      log("ERROR: no project_id provided")
       System.halt(1)
     end
+
+    log("starting, project=#{project_id}, agent=#{agent_id}")
 
     unless Node.connect(@node) do
-      IO.puts(:stderr, "ERROR: cannot connect to #{@node}")
+      log("ERROR: cannot connect to #{@node}")
       System.halt(1)
     end
 
-    IO.puts(:stderr, "OrchidMCP: connected to #{@node}, project=#{project_id}")
+    log("connected to #{@node}")
 
     state = %{project_id: project_id, agent_id: agent_id}
     loop(state)
   end
 
+  defp log(msg) do
+    ts = DateTime.utc_now() |> DateTime.to_string()
+    line = "[#{ts}] MCP: #{msg}\n"
+    File.write!(@log_file, line, [:append])
+    IO.puts(:stderr, "OrchidMCP: #{msg}")
+  end
+
+  # Use built-in JSON module (Elixir 1.18+) instead of Jason
+  defp json_decode(str), do: JSON.decode(str)
+  defp json_encode!(term), do: JSON.encode!(term)
+
   defp loop(state) do
     case IO.read(:stdio, :line) do
-      :eof -> :ok
-      {:error, _} -> :ok
+      :eof ->
+        log("EOF on stdin, exiting")
+        :ok
+      {:error, reason} ->
+        log("stdin error: #{inspect(reason)}, exiting")
+        :ok
       line ->
         line = String.trim(line)
         if line != "" do
-          case Jason.decode(line) do
-            {:ok, msg} ->
-              response = handle_message(msg, state)
-              if response do
-                IO.write(:stdio, Jason.encode!(response) <> "\n")
-              end
-            {:error, _} ->
-              :skip
+          log("recv: #{String.slice(line, 0, 300)}")
+          try do
+            case json_decode(line) do
+              {:ok, msg} ->
+                response = handle_message(msg, state)
+                if response do
+                  encoded = json_encode!(response)
+                  log("send: #{String.slice(encoded, 0, 300)}")
+                  IO.write(:stdio, encoded <> "\n")
+                else
+                  log("send: (nil, no response)")
+                end
+              {:error, err} ->
+                log("JSON decode error: #{inspect(err)}")
+            end
+          rescue
+            e ->
+              log("CRASH: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}")
           end
         end
         loop(state)
@@ -50,8 +78,8 @@ defmodule OrchidMCP do
   defp handle_message(%{"jsonrpc" => "2.0", "method" => method, "id" => id} = msg, state) do
     result = handle_method(method, msg["params"] || %{}, state)
     case result do
-      {:ok, r} -> %{jsonrpc: "2.0", id: id, result: r}
-      {:error, code, message} -> %{jsonrpc: "2.0", id: id, error: %{code: code, message: message}}
+      {:ok, r} -> %{"jsonrpc" => "2.0", "id" => id, "result" => r}
+      {:error, code, message} -> %{"jsonrpc" => "2.0", "id" => id, "error" => %{"code" => code, "message" => message}}
     end
   end
 
@@ -61,83 +89,90 @@ defmodule OrchidMCP do
 
   defp handle_method("initialize", _params, _state) do
     {:ok, %{
-      protocolVersion: "2024-11-05",
-      capabilities: %{tools: %{}},
-      serverInfo: %{name: "orchid-mcp", version: "1.0.0"}
+      "protocolVersion" => "2024-11-05",
+      "capabilities" => %{"tools" => %{}},
+      "serverInfo" => %{"name" => "orchid-mcp", "version" => "1.0.0"}
     }}
   end
 
   defp handle_method("tools/list", _params, _state) do
-    {:ok, %{tools: tools()}}
+    {:ok, %{"tools" => tools()}}
   end
 
   defp handle_method("tools/call", %{"name" => name, "arguments" => args}, state) do
-    IO.puts(:stderr, "OrchidMCP: tool #{name}(#{inspect(args) |> String.slice(0, 200)})")
+    log("TOOL CALL: #{name}(#{inspect(args) |> String.slice(0, 300)})")
     result = execute_tool(name, args, state)
-    content = case result do
-      {:ok, text} -> [%{type: "text", text: to_string(text)}]
-      {:error, err} -> [%{type: "text", text: "Error: #{inspect(err)}"}]
+    case result do
+      {:ok, text} ->
+        log("TOOL OK: #{name} -> #{String.slice(to_string(text), 0, 200)}")
+        {:ok, %{"content" => [%{"type" => "text", "text" => to_string(text)}], "isError" => false}}
+      {:error, err} ->
+        log("TOOL ERROR: #{name} -> #{inspect(err) |> String.slice(0, 200)}")
+        {:ok, %{"content" => [%{"type" => "text", "text" => "Error: #{inspect(err)}"}], "isError" => true}}
     end
-    {:ok, %{content: content, isError: match?({:error, _}, result)}}
   end
 
   defp handle_method(_method, _params, _state) do
     {:error, -32601, "Method not found"}
   end
 
-  # Tool definitions
+  # Tool definitions — use string keys for JSON serialization
   defp tools do
     [
-      %{name: "goal_list", description: "List all goals for the current project",
-        inputSchema: %{type: "object", properties: %{}}},
+      %{"name" => "goal_list", "description" => "List all goals for the current project",
+        "inputSchema" => %{"type" => "object", "properties" => %{}}},
 
-      %{name: "goal_read", description: "Read a goal's full details",
-        inputSchema: %{type: "object", properties: %{
-          id: %{type: "string", description: "Goal ID or name"}
+      %{"name" => "goal_read", "description" => "Read a goal's full details",
+        "inputSchema" => %{"type" => "object", "properties" => %{
+          "id" => %{"type" => "string", "description" => "Goal ID or name"}
         }}},
 
-      %{name: "goal_create", description: "Create a new goal",
-        inputSchema: %{type: "object", properties: %{
-          name: %{type: "string", description: "Short goal name"},
-          description: %{type: "string", description: "Detailed description — this is the work order"},
-          depends_on: %{type: "array", items: %{type: "string"}, description: "Goal IDs/names this depends on"},
-          parent_goal_id: %{type: "string", description: "Parent goal ID"}
+      %{"name" => "goal_create", "description" => "Create a new goal",
+        "inputSchema" => %{"type" => "object", "properties" => %{
+          "name" => %{"type" => "string", "description" => "Short goal name"},
+          "description" => %{"type" => "string", "description" => "Detailed description — this is the work order"},
+          "depends_on" => %{"type" => "array", "items" => %{"type" => "string"}, "description" => "Goal IDs/names this depends on"},
+          "parent_goal_id" => %{"type" => "string", "description" => "Parent goal ID"}
         }}},
 
-      %{name: "goal_update", description: "Update a goal's status",
-        inputSchema: %{type: "object", properties: %{
-          id: %{type: "string", description: "Goal ID or name"},
-          status: %{type: "string", description: "New status: pending or completed"}
+      %{"name" => "goal_update", "description" => "Update a goal's status or report",
+        "inputSchema" => %{"type" => "object", "properties" => %{
+          "id" => %{"type" => "string", "description" => "Goal ID or name"},
+          "status" => %{"type" => "string", "description" => "New status: pending or completed"},
+          "report" => %{"type" => "string", "description" => "Progress report or completion summary"}
         }}},
 
-      %{name: "agent_spawn", description: "Spawn an agent from a template and assign it a goal",
-        inputSchema: %{type: "object", properties: %{
-          template: %{type: "string", description: "Template name (Coder, Codex Coder, Reverse Engineer, Shell Operator, Explorer)"},
-          goal_id: %{type: "string", description: "Goal ID or name to assign"},
-          message: %{type: "string", description: "Initial message (only if no goal_id)"}
+      %{"name" => "agent_spawn", "description" => "Spawn an agent from a template and assign it a goal",
+        "inputSchema" => %{"type" => "object", "properties" => %{
+          "template" => %{"type" => "string", "description" => "Template name (Coder, Codex Coder, Reverse Engineer, Shell Operator, Explorer)"},
+          "goal_id" => %{"type" => "string", "description" => "Goal ID or name to assign"},
+          "message" => %{"type" => "string", "description" => "Initial message (only if no goal_id)"}
         }}},
 
-      %{name: "wait", description: "Wait up to N seconds for notifications from spawned agents",
-        inputSchema: %{type: "object", properties: %{
-          seconds: %{type: "integer", description: "Max seconds to wait (1-300)"}
+      %{"name" => "wait", "description" => "Wait up to N seconds for notifications from spawned agents",
+        "inputSchema" => %{"type" => "object", "properties" => %{
+          "seconds" => %{"type" => "integer", "description" => "Max seconds to wait (1-300)"}
         }}},
 
-      %{name: "list", description: "List files in the workspace",
-        inputSchema: %{type: "object", properties: %{
-          path: %{type: "string", description: "Path to list (default: /workspace)"}
+      %{"name" => "list", "description" => "List files in the workspace",
+        "inputSchema" => %{"type" => "object", "properties" => %{
+          "path" => %{"type" => "string", "description" => "Path to list (default: /workspace)"}
         }}},
 
-      %{name: "read", description: "Read a file from the workspace",
-        inputSchema: %{type: "object", properties: %{
-          path: %{type: "string", description: "File path"}
+      %{"name" => "read", "description" => "Read a file from the workspace",
+        "inputSchema" => %{"type" => "object", "properties" => %{
+          "path" => %{"type" => "string", "description" => "File path"}
         }}},
 
-      %{name: "grep", description: "Search file contents with a regex pattern",
-        inputSchema: %{type: "object", properties: %{
-          pattern: %{type: "string", description: "Regex pattern"},
-          path: %{type: "string", description: "Path to search (default: /workspace)"},
-          glob: %{type: "string", description: "File glob filter"}
-        }}}
+      %{"name" => "grep", "description" => "Search file contents with a regex pattern",
+        "inputSchema" => %{"type" => "object", "properties" => %{
+          "pattern" => %{"type" => "string", "description" => "Regex pattern"},
+          "path" => %{"type" => "string", "description" => "Path to search (default: /workspace)"},
+          "glob" => %{"type" => "string", "description" => "File glob filter"}
+        }}},
+
+      %{"name" => "ping", "description" => "Keepalive — call this every few minutes during long waits to prevent timeout. Returns 'pong'.",
+        "inputSchema" => %{"type" => "object", "properties" => %{}}}
     ]
   end
 
@@ -223,13 +258,18 @@ defmodule OrchidMCP do
     end
   end
 
-  defp execute_tool("goal_update", %{"id" => id, "status" => status}, state) do
+  defp execute_tool("goal_update", %{"id" => id} = args, state) do
     case resolve_goal(id, state.project_id) do
       nil -> {:error, "Goal not found: #{id}"}
       g ->
-        status_atom = String.to_existing_atom(status)
-        :rpc.call(@node, Orchid.Goals, :set_status, [g.id, status_atom])
-        {:ok, "Updated goal #{g.name} to #{status}"}
+        if args["status"] do
+          status_atom = String.to_existing_atom(args["status"])
+          :rpc.call(@node, Orchid.Goals, :set_status, [g.id, status_atom])
+        end
+        if args["report"] do
+          :rpc.call(@node, Orchid.Object, :update_metadata, [g.id, %{report: args["report"]}])
+        end
+        {:ok, "Updated goal #{g.name}#{if args["status"], do: " to #{args["status"]}", else: ""}"}
     end
   end
 
@@ -246,7 +286,8 @@ defmodule OrchidMCP do
     unless state.agent_id do
       {:ok, "No agent_id — cannot wait for notifications"}
     else
-      seconds = min(max(args["seconds"] || 60, 1), 300)
+      # Cap at 120s per wait call to avoid blocking too long
+      seconds = min(max(args["seconds"] || 60, 1), 120)
       deadline = System.monotonic_time(:second) + seconds
       wait_loop(state.agent_id, deadline)
     end
@@ -274,6 +315,10 @@ defmodule OrchidMCP do
       {:ok, output} -> {:ok, output}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp execute_tool("ping", _args, _state) do
+    {:ok, "pong"}
   end
 
   defp execute_tool(name, _args, _state) do

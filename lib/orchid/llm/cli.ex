@@ -26,14 +26,17 @@ defmodule Orchid.LLM.CLI do
     # Run in a Task to avoid blocking the caller
     task = Task.async(fn ->
       cmd = build_shell_command(args, config) <> " 2>&1"
-      Logger.info("CLI exec: #{String.slice(cmd, 0, 200)}")
+      Logger.info("CLI exec (full): #{cmd}")
       output = :os.cmd(String.to_charlist(cmd))
       result = to_string(output) |> String.trim()
-      Logger.info("CLI result (#{byte_size(result)} bytes): #{String.slice(result, 0, 200)}")
+      Logger.info("CLI result (#{byte_size(result)} bytes): #{String.slice(result, 0, 500)}")
       result
     end)
 
-    case Task.yield(task, 600_000) || Task.shutdown(task) do
+    # Orchestrators with MCP tools need much longer — they spawn agents and wait
+    timeout = if config[:use_orchid_tools], do: 3_600_000, else: 600_000
+
+    case Task.yield(task, timeout) || Task.shutdown(task) do
       {:ok, ""} ->
         Logger.error("CLI returned empty response")
         {:error, "CLI returned empty response"}
