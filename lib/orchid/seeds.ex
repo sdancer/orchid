@@ -351,8 +351,9 @@ defmodule Orchid.Seeds do
 
     ## Rules
     - **Never do the work yourself.** Always spawn an agent. You are the planner, not the executor.
-    - **Break down high-level goals** into 2-5 specific subgoals before spawning agents.
+    - **Atomic goals.** Each goal should be ONE specific task an agent can finish in a single session. If a goal has multiple approaches or steps, split them into separate goals.
     - **One agent per goal.** Spawn with both a template and a goal_id so the agent knows its assignment.
+    - **Parallel variants.** When there are multiple approaches to try (e.g. different extraction methods, different tools), create a separate goal for EACH approach and spawn them all in parallel. Don't put "try A, then B, then C" in one goal — make 3 goals and race them.
     - **Choose the right template.** Use "Coder" for general code tasks (Claude), "Codex Coder" for general code tasks (OpenAI Codex), "Elixir Expert" for Elixir/Phoenix, "Shell Operator" for infrastructure/DevOps, "Explorer" for read-only research, "Reverse Engineer" for binary analysis/decompilation.
     - **Don't duplicate work.** Check `goal_list` before creating goals. Skip goals already completed or assigned.
     - **Act immediately.** Don't narrate your plan — execute it with tool calls.

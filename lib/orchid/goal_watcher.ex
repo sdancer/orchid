@@ -129,10 +129,8 @@ defmodule Orchid.GoalWatcher do
 
     Enum.reduce(project_agents, state, fn agent_state, acc_state ->
       if agent_state.status != :idle do
-        # Agent is busy — skip, cooldown expiry handles re-kick after productive work
         acc_state
       else
-        # Check cooldown
         last_kick = Map.get(acc_state.kicked_agents, agent_state.id)
 
         if last_kick && now - last_kick < @re_kick_cooldown do
@@ -147,29 +145,24 @@ defmodule Orchid.GoalWatcher do
 
           if assigned_pending != [] do
             goal_names = Enum.map_join(assigned_pending, ", ", & &1.name)
+            tag = agent_tag(agent_state)
             last_role = List.last(agent_state.messages) && List.last(agent_state.messages).role
 
             if last_role in [:user, :tool] do
-              # Last message is already from us — retry the LLM call, don't stack another message
-              log(
-                "project \"#{project.name}\": agent #{agent_state.id} idle, last msg=#{last_role}, #{length(assigned_pending)} pending goal(s) — retrying"
-              )
+              log("agent #{agent_state.id} (#{tag}) idle, last msg=#{last_role}, goals: #{goal_names} — retrying")
 
               Task.start(fn ->
                 case Orchid.Agent.retry(agent_state.id) do
                   {:ok, response} ->
                     preview = response |> String.slice(0, 200) |> String.replace("\n", " ")
-                    log("retry agent #{agent_state.id} responded: #{preview}")
+                    log("agent #{agent_state.id} (#{tag}) retry responded: #{preview}")
 
                   {:error, reason} ->
-                    log("ERROR: retry agent #{agent_state.id} failed: #{inspect(reason)}")
+                    log("ERROR: agent #{agent_state.id} (#{tag}) retry failed: #{inspect(reason)}")
                 end
               end)
             else
-              # Last message is from assistant — send a new nudge
-              log(
-                "project \"#{project.name}\": agent #{agent_state.id} idle with #{length(assigned_pending)} pending goal(s) (#{goal_names}) — re-kicking"
-              )
+              log("agent #{agent_state.id} (#{tag}) idle, goals: #{goal_names} — re-kicking")
 
               Task.start(fn ->
                 message = "Continue working on your pending goals. Use `goal_list` to check current state."
@@ -177,10 +170,10 @@ defmodule Orchid.GoalWatcher do
                 case Orchid.Agent.stream(agent_state.id, message, fn _chunk -> :ok end) do
                   {:ok, response} ->
                     preview = response |> String.slice(0, 200) |> String.replace("\n", " ")
-                    log("re-kick agent #{agent_state.id} responded: #{preview}")
+                    log("agent #{agent_state.id} (#{tag}) re-kick responded: #{preview}")
 
                   {:error, reason} ->
-                    log("ERROR: re-kick agent #{agent_state.id} failed: #{inspect(reason)}")
+                    log("ERROR: agent #{agent_state.id} (#{tag}) re-kick failed: #{inspect(reason)}")
                 end
               end)
             end
@@ -250,7 +243,7 @@ defmodule Orchid.GoalWatcher do
             """
 
             Task.start(fn ->
-              log("streaming kickoff to #{agent_id}...")
+              log("streaming kickoff to planner #{agent_id}...")
 
               result =
                 Orchid.Agent.stream(agent_id, String.trim(message), fn _chunk -> :ok end)
@@ -258,10 +251,10 @@ defmodule Orchid.GoalWatcher do
               case result do
                 {:ok, response} ->
                   preview = response |> String.slice(0, 200) |> String.replace("\n", " ")
-                  log("agent #{agent_id} responded: #{preview}")
+                  log("planner #{agent_id} responded: #{preview}")
 
                 {:error, reason} ->
-                  log("ERROR: agent #{agent_id} stream failed: #{inspect(reason)}")
+                  log("ERROR: planner #{agent_id} stream failed: #{inspect(reason)}")
               end
             end)
 
@@ -276,6 +269,21 @@ defmodule Orchid.GoalWatcher do
   defp find_planner_template do
     Orchid.Object.list_agent_templates()
     |> Enum.find(fn t -> t.name == "Planner" end)
+  end
+
+  # Short tag for log lines: "TemplateName/provider"
+  defp agent_tag(agent_state) do
+    provider = agent_state.config[:provider] || "?"
+    model = agent_state.config[:model]
+    tname = case agent_state.config[:template_id] do
+      nil -> nil
+      tid ->
+        case Orchid.Object.get(tid) do
+          {:ok, t} -> t.name
+          _ -> nil
+        end
+    end
+    tname || "#{provider}#{if model, do: "/#{model}", else: ""}"
   end
 
   defp log(msg) do

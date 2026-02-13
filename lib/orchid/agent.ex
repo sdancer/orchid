@@ -371,12 +371,13 @@ defmodule Orchid.Agent do
     # Preserve notifications that arrived during the Task's execution
     new_state = %{new_state | status: :idle, notifications: state.notifications}
 
+    agent_tag = agent_log_tag(new_state)
     case result do
       {:ok, response} ->
         preview = (response || "") |> String.slice(0, 150) |> String.replace("\n", " ")
-        Logger.info("Agent #{new_state.id} done: #{preview}")
+        Logger.info("Agent #{new_state.id} (#{agent_tag}) done: #{preview}")
       {:error, reason} ->
-        Logger.error("Agent #{new_state.id} failed: #{inspect(reason)}")
+        Logger.error("Agent #{new_state.id} (#{agent_tag}) failed: #{inspect(reason)}")
     end
 
     publish_state(new_state)
@@ -390,7 +391,32 @@ defmodule Orchid.Agent do
       auto_complete_goals(new_state, result)
     end
 
-    {:noreply, new_state}
+    # Worker agents: stop when done (success or failure)
+    # On success: goals are auto-completed, agent has nothing left to do
+    # On error: agent is broken, GoalWatcher will clear the assignment and retry with a fresh agent
+    if new_state.project_id && !new_state.config[:use_orchid_tools] do
+      case result do
+        {:error, reason} ->
+          Logger.info("Agent #{new_state.id} (#{agent_tag}) stopping after error: #{inspect(reason)}")
+          {:stop, :normal, new_state}
+
+        {:ok, _} ->
+          has_pending =
+            Orchid.Object.list_goals_for_project(new_state.project_id)
+            |> Enum.any?(fn g ->
+              g.metadata[:agent_id] == new_state.id and g.metadata[:status] != :completed
+            end)
+
+          unless has_pending do
+            Logger.info("Agent #{new_state.id} (#{agent_tag}) has no pending goals — stopping")
+            {:stop, :normal, new_state}
+          else
+            {:noreply, new_state}
+          end
+      end
+    else
+      {:noreply, new_state}
+    end
   end
 
   @impl true
@@ -398,6 +424,35 @@ defmodule Orchid.Agent do
     :ets.delete(:orchid_agent_states, state.id)
     Store.delete_agent_state(state.id)
     :ok
+  end
+
+  # Build a short tag for log lines: "provider/model, goal: name"
+  defp agent_log_tag(state) do
+    provider = state.config[:provider] || "?"
+    model = state.config[:model]
+    template = state.config[:template_id]
+
+    # Look up template name
+    tname = if template do
+      case Orchid.Object.get(template) do
+        {:ok, t} -> t.name
+        _ -> nil
+      end
+    end
+
+    # Look up assigned goal
+    gname = if state.project_id do
+      Orchid.Object.list_goals_for_project(state.project_id)
+      |> Enum.find(fn g -> g.metadata[:agent_id] == state.id end)
+      |> case do
+        nil -> nil
+        g -> g.name
+      end
+    end
+
+    parts = [tname || "#{provider}#{if model, do: "/#{model}", else: ""}"]
+    parts = if gname, do: parts ++ ["goal: #{gname}"], else: parts
+    Enum.join(parts, ", ")
   end
 
   # Auto-complete goals for CLI agents that can't call goal_update themselves
