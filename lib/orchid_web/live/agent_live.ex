@@ -24,7 +24,10 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:goals, [])
       |> assign(:creating_goal, false)
       |> assign(:new_goal_name, "")
+      |> assign(:new_goal_description, "")
+      |> assign(:new_goal_parent, nil)
       |> assign(:editing_goal, nil)
+      |> assign(:expanded_goal, nil)
       |> assign(:adding_dependency_to, nil)
       |> assign(:assigning_goal, nil)
       |> assign(:goals_view_mode, :list)
@@ -41,19 +44,19 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:template_provider, :cli)
       |> assign(:template_system_prompt, "")
       |> assign(:template_category, "General")
-      |> assign(:sandbox_active, false)
-      |> assign(:sandbox_status, nil)
+      |> assign(:sandbox_statuses, %{})
       |> assign(:agent_status, :idle)
+      |> assign(:system_prompt, nil)
+      |> assign(:show_system_prompt, false)
 
     socket =
       if agent_id do
-        case Orchid.Agent.get_state(agent_id) do
+        case Orchid.Agent.get_state(agent_id, 2000) do
           {:ok, state} ->
             socket
             |> assign(:messages, format_messages(state.messages))
             |> assign(:agent_status, state.status)
-            |> assign(:sandbox_active, state.sandbox != nil)
-            |> assign(:sandbox_status, state.sandbox && state.sandbox[:status])
+            |> assign(:system_prompt, state.config[:system_prompt])
 
           _ ->
             socket
@@ -86,29 +89,29 @@ defmodule OrchidWeb.AgentLive do
 
     socket =
       if agent_id do
-        case Orchid.Agent.get_state(agent_id) do
+        case Orchid.Agent.get_state(agent_id, 2000) do
           {:ok, state} ->
             template_info = get_template_info(state.config[:template_id])
 
             socket
             |> assign(:messages, format_messages(state.messages))
             |> assign(:current_agent_template, template_info)
-            |> assign(:sandbox_active, state.sandbox != nil)
-            |> assign(:sandbox_status, state.sandbox && state.sandbox[:status])
+            |> assign(:system_prompt, state.config[:system_prompt])
+            |> assign(:show_system_prompt, false)
 
           _ ->
             socket
             |> assign(:messages, [])
             |> assign(:current_agent_template, nil)
-            |> assign(:sandbox_active, false)
-            |> assign(:sandbox_status, nil)
+            |> assign(:system_prompt, nil)
+            |> assign(:show_system_prompt, false)
         end
       else
         socket
         |> assign(:messages, [])
         |> assign(:current_agent_template, nil)
-        |> assign(:sandbox_active, false)
-        |> assign(:sandbox_status, nil)
+        |> assign(:system_prompt, nil)
+        |> assign(:show_system_prompt, false)
       end
 
     {:noreply, socket}
@@ -173,20 +176,8 @@ defmodule OrchidWeb.AgentLive do
 
   def handle_event("stop_agent", %{"id" => id}, socket) do
     Orchid.Agent.stop(id)
-    # Small delay to ensure Registry is updated after process terminates
-    Process.sleep(50)
-
-    socket =
-      socket
-      |> assign(:agents, list_agents_with_info())
-      |> then(fn s ->
-        if s.assigns.current_agent == id do
-          push_patch(s, to: "/")
-        else
-          s
-        end
-      end)
-
+    # Refresh after a short delay to let Registry update
+    Process.send_after(self(), {:refresh_after_stop, id}, 100)
     {:noreply, socket}
   end
 
@@ -327,7 +318,8 @@ defmodule OrchidWeb.AgentLive do
     {:noreply,
      socket
      |> assign(:current_project, id)
-     |> assign(:goals, Orchid.Object.list_goals_for_project(id))}
+     |> assign(:goals, Orchid.Goals.list_for_project(id))
+     |> refresh_sandbox_statuses()}
   end
 
   def handle_event("clear_project", _params, socket) do
@@ -353,8 +345,7 @@ defmodule OrchidWeb.AgentLive do
     name = String.trim(socket.assigns.new_project_name)
 
     if name != "" do
-      {:ok, project} = Orchid.Object.create(:project, name, "")
-      Orchid.Project.ensure_dir(project.id)
+      {:ok, project} = Orchid.Projects.create(name)
 
       {:noreply,
        assign(socket,
@@ -369,8 +360,7 @@ defmodule OrchidWeb.AgentLive do
   end
 
   def handle_event("delete_project", %{"id" => id}, socket) do
-    Orchid.Project.delete_dir(id)
-    Orchid.Object.delete(id)
+    Orchid.Projects.delete(id)
 
     socket =
       socket
@@ -386,17 +376,50 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, socket}
   end
 
+  # Project status events
+  def handle_event("pause_project", %{"id" => id}, socket) do
+    Orchid.Projects.pause(id)
+    {:noreply, assign(socket, :projects, Orchid.Object.list_projects())}
+  end
+
+  def handle_event("resume_project", %{"id" => id}, socket) do
+    Orchid.Projects.resume(id)
+    {:noreply, assign(socket, :projects, Orchid.Object.list_projects())}
+  end
+
+  def handle_event("archive_project", %{"id" => id}, socket) do
+    Orchid.Projects.archive(id)
+    {:noreply, assign(socket, :projects, Orchid.Object.list_projects())}
+  end
+
+  def handle_event("restore_project", %{"id" => id}, socket) do
+    Orchid.Projects.restore(id)
+    {:noreply, assign(socket, :projects, Orchid.Object.list_projects())}
+  end
+
   # Goal events
   def handle_event("show_new_goal", _params, socket) do
-    {:noreply, assign(socket, creating_goal: true, new_goal_name: "")}
+    {:noreply, assign(socket, creating_goal: true, new_goal_name: "", new_goal_description: "", new_goal_parent: nil)}
   end
 
   def handle_event("cancel_new_goal", _params, socket) do
-    {:noreply, assign(socket, creating_goal: false, new_goal_name: "")}
+    {:noreply, assign(socket, creating_goal: false, new_goal_name: "", new_goal_description: "", new_goal_parent: nil)}
   end
 
   def handle_event("update_new_goal_name", %{"name" => name}, socket) do
     {:noreply, assign(socket, :new_goal_name, name)}
+  end
+
+  def handle_event("update_new_goal_description", %{"description" => desc}, socket) do
+    {:noreply, assign(socket, :new_goal_description, desc)}
+  end
+
+  def handle_event("update_new_goal_parent", %{"parent" => ""}, socket) do
+    {:noreply, assign(socket, :new_goal_parent, nil)}
+  end
+
+  def handle_event("update_new_goal_parent", %{"parent" => parent_id}, socket) do
+    {:noreply, assign(socket, :new_goal_parent, parent_id)}
   end
 
   def handle_event("create_goal", _params, socket) do
@@ -404,67 +427,44 @@ defmodule OrchidWeb.AgentLive do
     project_id = socket.assigns.current_project
 
     if name != "" and project_id do
-      {:ok, _goal} =
-        Orchid.Object.create(:goal, name, "", metadata: %{
-          project_id: project_id,
-          status: :pending,
-          depends_on: []
-        })
+      description = String.trim(socket.assigns.new_goal_description)
+      Orchid.Goals.create(name, description, project_id, parent_goal_id: socket.assigns.new_goal_parent)
 
       {:noreply,
-       assign(socket,
-         goals: Orchid.Object.list_goals_for_project(project_id),
-         creating_goal: false,
-         new_goal_name: ""
-       )}
+       socket
+       |> refresh_goals()
+       |> assign(creating_goal: false, new_goal_name: "", new_goal_description: "", new_goal_parent: nil)}
     else
       {:noreply, socket}
     end
   end
 
   def handle_event("update_goal_status", %{"id" => id, "status" => status}, socket) do
-    status_atom = String.to_existing_atom(status)
-    {:ok, _} = Orchid.Object.update_metadata(id, %{status: status_atom})
-
-    {:noreply,
-     assign(socket, :goals, Orchid.Object.list_goals_for_project(socket.assigns.current_project))}
+    Orchid.Goals.set_status(id, String.to_existing_atom(status))
+    {:noreply, refresh_goals(socket)}
   end
 
   def handle_event("toggle_goal_status", %{"id" => id}, socket) do
-    case Orchid.Object.get(id) do
-      {:ok, goal} ->
-        new_status =
-          case goal.metadata[:status] do
-            :completed -> :pending
-            _ -> :completed
-          end
+    Orchid.Goals.toggle_status(id)
+    {:noreply, refresh_goals(socket)}
+  end
 
-        {:ok, _} = Orchid.Object.update_metadata(id, %{status: new_status})
-
-        {:noreply,
-         assign(socket, :goals, Orchid.Object.list_goals_for_project(socket.assigns.current_project))}
-
-      _ ->
-        {:noreply, socket}
-    end
+  def handle_event("toggle_goal_details", %{"id" => id}, socket) do
+    expanded = if socket.assigns.expanded_goal == id, do: nil, else: id
+    {:noreply, assign(socket, :expanded_goal, expanded)}
   end
 
   def handle_event("delete_goal", %{"id" => id}, socket) do
-    # Remove this goal from any depends_on lists
-    goals = socket.assigns.goals
+    Orchid.Goals.delete(id)
+    {:noreply, refresh_goals(socket)}
+  end
 
-    for goal <- goals do
-      depends_on = goal.metadata[:depends_on] || []
-
-      if id in depends_on do
-        Orchid.Object.update_metadata(goal.id, %{depends_on: List.delete(depends_on, id)})
-      end
+  def handle_event("clear_all_goals", _params, socket) do
+    if socket.assigns.current_project do
+      Orchid.Goals.clear_project(socket.assigns.current_project)
     end
 
-    Orchid.Object.delete(id)
-
-    {:noreply,
-     assign(socket, :goals, Orchid.Object.list_goals_for_project(socket.assigns.current_project))}
+    {:noreply, refresh_goals(socket)}
   end
 
   def handle_event("start_add_dependency", %{"id" => id}, socket) do
@@ -476,36 +476,17 @@ defmodule OrchidWeb.AgentLive do
   end
 
   def handle_event("add_dependency", %{"goal-id" => goal_id, "depends-on" => depends_on_id}, socket) do
-    case Orchid.Object.get(goal_id) do
-      {:ok, goal} ->
-        current_deps = goal.metadata[:depends_on] || []
+    Orchid.Goals.add_dependency(goal_id, depends_on_id)
 
-        if depends_on_id not in current_deps do
-          {:ok, _} = Orchid.Object.update_metadata(goal_id, %{depends_on: [depends_on_id | current_deps]})
-        end
-
-        {:noreply,
-         socket
-         |> assign(:goals, Orchid.Object.list_goals_for_project(socket.assigns.current_project))
-         |> assign(:adding_dependency_to, nil)}
-
-      _ ->
-        {:noreply, socket}
-    end
+    {:noreply,
+     socket
+     |> refresh_goals()
+     |> assign(:adding_dependency_to, nil)}
   end
 
   def handle_event("remove_dependency", %{"goal-id" => goal_id, "depends-on" => depends_on_id}, socket) do
-    case Orchid.Object.get(goal_id) do
-      {:ok, goal} ->
-        current_deps = goal.metadata[:depends_on] || []
-        {:ok, _} = Orchid.Object.update_metadata(goal_id, %{depends_on: List.delete(current_deps, depends_on_id)})
-
-        {:noreply,
-         assign(socket, :goals, Orchid.Object.list_goals_for_project(socket.assigns.current_project))}
-
-      _ ->
-        {:noreply, socket}
-    end
+    Orchid.Goals.remove_dependency(goal_id, depends_on_id)
+    {:noreply, refresh_goals(socket)}
   end
 
   def handle_event("toggle_goals_view", _params, socket) do
@@ -522,42 +503,44 @@ defmodule OrchidWeb.AgentLive do
   end
 
   def handle_event("assign_goal_to_agent", %{"goal-id" => goal_id, "agent-id" => agent_id}, socket) do
-    case Orchid.Object.get(goal_id) do
-      {:ok, goal} ->
-        {:ok, _} = Orchid.Object.update_metadata(goal_id, %{agent_id: agent_id})
+    Orchid.Goals.assign_to_agent(goal_id, agent_id)
 
-        # Send the goal as a message to the agent
-        message = "Work on goal: #{goal.name}\nGoal ID: #{goal_id}"
-        Task.start(fn ->
-          Orchid.Agent.stream(agent_id, message, fn _chunk -> :ok end)
-        end)
+    {:noreply,
+     socket
+     |> refresh_goals()
+     |> assign(:assigning_goal, nil)}
+  end
 
-        {:noreply,
-         socket
-         |> assign(:goals, Orchid.Object.list_goals_for_project(socket.assigns.current_project))
-         |> assign(:assigning_goal, nil)}
+  def handle_event("toggle_system_prompt", _params, socket) do
+    {:noreply, assign(socket, :show_system_prompt, !socket.assigns.show_system_prompt)}
+  end
 
-      _ ->
-        {:noreply, socket}
+  def handle_event("start_sandbox", %{"id" => project_id}, socket) do
+    Orchid.Projects.ensure_sandbox(project_id)
+    {:noreply, refresh_sandbox_statuses(socket)}
+  end
+
+  def handle_event("stop_sandbox", %{"id" => project_id}, socket) do
+    Orchid.Projects.stop_sandbox(project_id)
+    {:noreply, refresh_sandbox_statuses(socket)}
+  end
+
+  def handle_event("reset_sandbox", %{"id" => project_id}, socket) do
+    case Orchid.Sandbox.reset(project_id) do
+      {:ok, _status} -> :ok
+      {:error, _reason} -> :ok
     end
+
+    {:noreply, refresh_sandbox_statuses(socket)}
   end
 
   def handle_event("reset_sandbox", _params, socket) do
-    agent_id = socket.assigns.current_agent
-
-    if agent_id do
-      case Orchid.Agent.reset_sandbox(agent_id) do
-        {:ok, status} ->
-          {:noreply,
-           socket
-           |> assign(:sandbox_status, status[:status])
-           |> assign(:sandbox_active, true)}
-
-        {:error, _reason} ->
-          {:noreply, socket}
-      end
-    else
-      {:noreply, socket}
+    # Legacy: reset sandbox from agent chat view using current project
+    case socket.assigns.current_project do
+      nil -> {:noreply, socket}
+      project_id ->
+        Orchid.Sandbox.reset(project_id)
+        {:noreply, refresh_sandbox_statuses(socket)}
     end
   end
 
@@ -676,6 +659,21 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, socket}
   end
 
+  def handle_info({:refresh_after_stop, id}, socket) do
+    socket =
+      socket
+      |> assign(:agents, list_agents_with_info())
+      |> then(fn s ->
+        if s.assigns.current_agent == id do
+          push_patch(s, to: "/")
+        else
+          s
+        end
+      end)
+
+    {:noreply, socket}
+  end
+
   def handle_info(:poll_agent_status, socket) do
     socket =
       case socket.assigns.current_agent do
@@ -683,7 +681,7 @@ defmodule OrchidWeb.AgentLive do
           socket
 
         agent_id ->
-          case Orchid.Agent.get_state(agent_id) do
+          case Orchid.Agent.get_state(agent_id, 2000) do
             {:ok, state} ->
               socket
               |> assign(:agent_status, state.status)
@@ -693,6 +691,8 @@ defmodule OrchidWeb.AgentLive do
               socket
           end
       end
+
+    socket = refresh_sandbox_statuses(socket)
 
     Process.send_after(self(), :poll_agent_status, 2000)
     {:noreply, socket}
@@ -755,19 +755,21 @@ defmodule OrchidWeb.AgentLive do
               </div>
             <% end %>
             <%= for project <- filter_projects(@projects, @project_query, @current_project) do %>
+              <% p_status = project.metadata[:status] %>
               <div
                 class="project-item"
                 phx-click="select_project"
                 phx-value-id={project.id}
+                style={if p_status in [:paused, :archived], do: "opacity: 0.5;", else: ""}
               >
                 <span class="project-icon"></span>
                 <span style="flex: 1;"><%= project.name %></span>
-                <button
-                  class="btn btn-danger btn-sm"
-                  style="padding: 0.15rem 0.4rem; font-size: 0.7rem; opacity: 0.7;"
-                  phx-click="delete_project"
-                  phx-value-id={project.id}
-                >×</button>
+                <%= if p_status == :paused do %>
+                  <span style="font-size: 0.65rem; color: #d29922; background: #2d2000; padding: 0.05rem 0.3rem; border-radius: 3px;">paused</span>
+                <% end %>
+                <%= if p_status == :archived do %>
+                  <span style="font-size: 0.65rem; color: #8b949e; background: #21262d; padding: 0.05rem 0.3rem; border-radius: 3px;">archived</span>
+                <% end %>
               </div>
             <% end %>
             <%= if @projects == [] and not @creating_project do %>
@@ -900,9 +902,10 @@ defmodule OrchidWeb.AgentLive do
 
           <%= if @current_agent do %>
             <div class="chat-container">
-              <%= if @sandbox_active do %>
+              <% sb = @sandbox_statuses[@current_project] %>
+              <%= if sb do %>
                 <div style="background: #1a2332; border-bottom: 1px solid #30363d; padding: 0.4rem 1rem; font-size: 0.8rem; display: flex; align-items: center; justify-content: space-between;">
-                  <span style="color: #7ee787;">Sandbox: <%= @sandbox_status %></span>
+                  <span style="color: #7ee787;">Sandbox: <%= sb[:status] %></span>
                   <button class="btn btn-secondary btn-sm" style="padding: 0.15rem 0.5rem; font-size: 0.75rem;" phx-click="reset_sandbox">Reset</button>
                 </div>
               <% end %>
@@ -914,7 +917,17 @@ defmodule OrchidWeb.AgentLive do
                   <span style="color: #7ee787;"><%= @current_agent_template.category %></span>
                   <span style="color: #6e7681;">•</span>
                   <span style="color: #8b949e;"><%= @current_agent_template.provider %> / <%= @current_agent_template.model %></span>
+                  <%= if @system_prompt do %>
+                    <button
+                      class="btn btn-secondary btn-sm"
+                      style="padding: 0.1rem 0.4rem; font-size: 0.7rem; margin-left: auto;"
+                      phx-click="toggle_system_prompt"
+                    ><%= if @show_system_prompt, do: "Hide Prompt", else: "System Prompt" %></button>
+                  <% end %>
                 </div>
+              <% end %>
+              <%= if @show_system_prompt and @system_prompt do %>
+                <div style="background: #0d1117; border-bottom: 1px solid #30363d; padding: 0.75rem 1rem; max-height: 300px; overflow-y: auto; font-size: 0.8rem; color: #8b949e; white-space: pre-wrap; font-family: monospace; line-height: 1.5;"><%= @system_prompt %></div>
               <% end %>
               <div class="messages" id="messages" phx-hook="ScrollBottom">
                 <%= for msg <- @messages do %>
@@ -990,8 +1003,46 @@ defmodule OrchidWeb.AgentLive do
                 <h2 style="color: #c9d1d9; margin-bottom: 0.5rem;">
                   Project: <%= get_project_name(@projects, @current_project) %>
                 </h2>
-                <div style="color: #8b949e; font-size: 0.85rem; margin-bottom: 1rem;">
+                <div style="color: #8b949e; font-size: 0.85rem; margin-bottom: 0.5rem;">
                   Folder: <%= Orchid.Project.files_path(@current_project) %>
+                </div>
+
+                <% project_status = get_project_status(@projects, @current_project) %>
+                <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+                  <span style={"font-size: 0.8rem; padding: 0.15rem 0.5rem; border-radius: 3px; #{project_status_style(project_status)}"}>
+                    <%= project_status_label(project_status) %>
+                  </span>
+                  <%= if project_status in [nil, :active] do %>
+                    <button class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="pause_project" phx-value-id={@current_project}>Pause</button>
+                    <button class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="archive_project" phx-value-id={@current_project}>Archive</button>
+                  <% end %>
+                  <%= if project_status == :paused do %>
+                    <button class="btn btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="resume_project" phx-value-id={@current_project}>Resume</button>
+                    <button class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="archive_project" phx-value-id={@current_project}>Archive</button>
+                  <% end %>
+                  <%= if project_status == :archived do %>
+                    <button class="btn btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="restore_project" phx-value-id={@current_project}>Restore</button>
+                  <% end %>
+                </div>
+
+                <div class="sandbox-section" style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin-bottom: 1rem;">
+                  <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <h3 style="color: #c9d1d9; margin: 0; font-size: 1rem;">Sandbox</h3>
+                    <% sb = @sandbox_statuses[@current_project] %>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                      <%= if sb do %>
+                        <span style={"font-size: 0.8rem; padding: 0.15rem 0.5rem; border-radius: 3px; #{sandbox_status_style(sb[:status])}"}>
+                          <%= sb[:status] %>
+                        </span>
+                        <span style="color: #6e7681; font-size: 0.75rem;"><%= sb[:container_name] %></span>
+                        <button class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="reset_sandbox" phx-value-id={@current_project}>Reset</button>
+                        <button class="btn btn-danger btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="stop_sandbox" phx-value-id={@current_project}>Stop</button>
+                      <% else %>
+                        <span style="font-size: 0.8rem; color: #8b949e;">Not running</span>
+                        <button class="btn btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="start_sandbox" phx-value-id={@current_project}>Start</button>
+                      <% end %>
+                    </div>
+                  </div>
                 </div>
 
                 <div class="goals-section" style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin-bottom: 1rem;">
@@ -1005,6 +1056,14 @@ defmodule OrchidWeb.AgentLive do
                           phx-click="toggle_goals_view"
                         ><%= if @goals_view_mode == :list, do: "Graph", else: "List" %></button>
                       <% end %>
+                      <%= if @goals != [] do %>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          style="padding: 0.2rem 0.5rem; font-size: 0.75rem; opacity: 0.7;"
+                          phx-click="clear_all_goals"
+                          data-confirm="Delete all goals for this project?"
+                        >Clear All</button>
+                      <% end %>
                       <%= if not @creating_goal do %>
                         <button class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="show_new_goal">+ Add Goal</button>
                       <% end %>
@@ -1012,16 +1071,37 @@ defmodule OrchidWeb.AgentLive do
                   </div>
 
                   <%= if @creating_goal do %>
-                    <form phx-submit="create_goal" phx-change="update_new_goal_name" style="margin-bottom: 1rem;">
+                    <form phx-submit="create_goal" style="margin-bottom: 1rem;">
                       <input
                         type="text"
                         name="name"
                         value={@new_goal_name}
+                        phx-change="update_new_goal_name"
                         placeholder="Goal name"
                         class="sidebar-search"
                         style="width: 100%; margin-bottom: 0.5rem;"
                         autofocus
                       />
+                      <textarea
+                        name="description"
+                        phx-change="update_new_goal_description"
+                        placeholder="Description (optional)"
+                        class="sidebar-search"
+                        style="width: 100%; margin-bottom: 0.5rem; min-height: 3rem; resize: vertical;"
+                      ><%= @new_goal_description %></textarea>
+                      <%= if @goals != [] do %>
+                        <select
+                          name="parent"
+                          class="sidebar-search"
+                          style="width: 100%; margin-bottom: 0.5rem;"
+                          phx-change="update_new_goal_parent"
+                        >
+                          <option value="">No parent</option>
+                          <%= for goal <- @goals do %>
+                            <option value={goal.id} selected={@new_goal_parent == goal.id}><%= goal.name %></option>
+                          <% end %>
+                        </select>
+                      <% end %>
                       <div style="display: flex; gap: 0.5rem;">
                         <button type="submit" class="btn btn-sm">Add</button>
                         <button type="button" class="btn btn-secondary btn-sm" phx-click="cancel_new_goal">Cancel</button>
@@ -1102,7 +1182,18 @@ defmodule OrchidWeb.AgentLive do
                               >
                                 <%= if goal.metadata[:status] == :completed, do: "✓", else: "" %>
                               </button>
-                              <span style={"flex: 1; color: #{if goal.metadata[:status] == :completed, do: "#8b949e", else: "#c9d1d9"}; #{if goal.metadata[:status] == :completed, do: "text-decoration: line-through;", else: ""}"}><%= goal.name %></span>
+                              <span
+                                style={"flex: 1; cursor: pointer; color: #{if goal.metadata[:status] == :completed, do: "#8b949e", else: "#c9d1d9"}; #{if goal.metadata[:status] == :completed, do: "text-decoration: line-through;", else: ""}"}
+                                phx-click="toggle_goal_details"
+                                phx-value-id={goal.id}
+                              >
+                                <%= goal.name %>
+                                <%= if is_nil(goal.metadata[:parent_goal_id]) do %>
+                                  <span style="font-size: 0.65rem; color: #bc8cff; background: #1e1530; padding: 0.05rem 0.3rem; border-radius: 3px; margin-left: 0.25rem;">root</span>
+                                <% else %>
+                                  <span style="font-size: 0.75rem; color: #8b949e;"> (sub of: <%= get_goal_name(@goals, goal.metadata[:parent_goal_id]) %>)</span>
+                                <% end %>
+                              </span>
                               <%= if goal.metadata[:agent_id] do %>
                                 <span style="background: #1a2332; color: #58a6ff; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem;">
                                   <%= short_agent_id(goal.metadata[:agent_id]) %>
@@ -1129,6 +1220,26 @@ defmodule OrchidWeb.AgentLive do
                                 phx-value-id={goal.id}
                               >×</button>
                             </div>
+                            <%= if @expanded_goal == goal.id do %>
+                              <div style="margin-top: 0.5rem; margin-left: 1.75rem; padding: 0.5rem; background: #161b22; border: 1px solid #21262d; border-radius: 4px; font-size: 0.8rem;">
+                                <%= if goal.content != "" do %>
+                                  <div style="color: #c9d1d9; margin-bottom: 0.5rem; white-space: pre-wrap;"><%= goal.content %></div>
+                                <% else %>
+                                  <div style="color: #6e7681; margin-bottom: 0.5rem; font-style: italic;">No description</div>
+                                <% end %>
+                                <div style="color: #6e7681; font-size: 0.7rem; display: flex; flex-wrap: wrap; gap: 0.75rem;">
+                                  <span>ID: <span style="color: #8b949e; font-family: monospace;"><%= goal.id %></span></span>
+                                  <span>Status: <span style="color: #8b949e;"><%= goal.metadata[:status] %></span></span>
+                                  <%= if goal.metadata[:parent_goal_id] do %>
+                                    <span>Parent: <span style="color: #8b949e;"><%= get_goal_name(@goals, goal.metadata[:parent_goal_id]) %></span></span>
+                                  <% end %>
+                                  <%= if goal.metadata[:agent_id] do %>
+                                    <span>Agent: <span style="color: #58a6ff; font-family: monospace;"><%= short_agent_id(goal.metadata[:agent_id]) %></span></span>
+                                  <% end %>
+                                  <span>Created: <span style="color: #8b949e;"><%= Calendar.strftime(goal.created_at, "%Y-%m-%d %H:%M") %></span></span>
+                                </div>
+                              </div>
+                            <% end %>
                             <%= if (goal.metadata[:depends_on] || []) != [] do %>
                               <div style="margin-top: 0.5rem; margin-left: 1.75rem; font-size: 0.85rem; color: #8b949e;">
                                 depends on:
@@ -1213,11 +1324,6 @@ defmodule OrchidWeb.AgentLive do
                       <span class="project-badge"><%= get_project_name(@projects, agent.project_id) %></span>
                     </div>
                   <% end %>
-                  <%= if agent.sandbox_status do %>
-                    <div style="margin-top: 0.25rem;">
-                      <span style="background: #1a2332; color: #7ee787; padding: 0.15rem 0.5rem; border-radius: 3px; font-size: 0.75rem;"><%= agent.sandbox_status %></span>
-                    </div>
-                  <% end %>
                   <div class="actions">
                     <button class="btn btn-secondary" phx-click="select_agent" phx-value-id={agent.id}>Open</button>
                     <button class="btn btn-danger" phx-click="stop_agent" phx-value-id={agent.id}>Stop</button>
@@ -1250,6 +1356,23 @@ defmodule OrchidWeb.AgentLive do
     end
   end
 
+  defp get_project_status(projects, id) do
+    case Enum.find(projects, fn p -> p.id == id end) do
+      nil -> nil
+      project -> project.metadata[:status]
+    end
+  end
+
+  defp project_status_label(nil), do: "Active"
+  defp project_status_label(:active), do: "Active"
+  defp project_status_label(:paused), do: "Paused"
+  defp project_status_label(:archived), do: "Archived"
+
+  defp project_status_style(nil), do: "background: #0e2a15; color: #7ee787;"
+  defp project_status_style(:active), do: "background: #0e2a15; color: #7ee787;"
+  defp project_status_style(:paused), do: "background: #2d2000; color: #d29922;"
+  defp project_status_style(:archived), do: "background: #21262d; color: #8b949e;"
+
   defp get_goal_name(goals, id) do
     case Enum.find(goals, fn g -> g.id == id end) do
       nil -> "Unknown"
@@ -1278,19 +1401,52 @@ defmodule OrchidWeb.AgentLive do
 
   defp list_agents_with_info do
     Orchid.Agent.list()
-    |> Enum.map(fn agent_id ->
-      case Orchid.Agent.get_state(agent_id) do
-        {:ok, state} ->
-          %{
-            id: agent_id,
-            project_id: state.project_id,
-            sandbox_status: state.sandbox && state.sandbox[:status]
-          }
+    |> Task.async_stream(
+      fn agent_id ->
+        case Orchid.Agent.get_state(agent_id, 1000) do
+          {:ok, state} ->
+            %{id: agent_id, project_id: state.project_id}
 
-        _ ->
-          %{id: agent_id, project_id: nil, sandbox_status: nil}
-      end
+          _ ->
+            %{id: agent_id, project_id: nil}
+        end
+      end,
+      timeout: 2000,
+      on_timeout: :kill_task
+    )
+    |> Enum.map(fn
+      {:ok, info} -> info
+      _ -> nil
     end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp refresh_sandbox_statuses(socket) do
+    case socket.assigns.current_project do
+      nil ->
+        assign(socket, :sandbox_statuses, %{})
+
+      project_id ->
+        statuses =
+          case Orchid.Projects.sandbox_status(project_id) do
+            nil -> %{}
+            status -> %{project_id => status}
+          end
+
+        assign(socket, :sandbox_statuses, statuses)
+    end
+  end
+
+  defp sandbox_status_style(:ready), do: "background: #0e2a15; color: #7ee787;"
+  defp sandbox_status_style(:starting), do: "background: #2d2000; color: #d29922;"
+  defp sandbox_status_style(:error), do: "background: #3d1114; color: #f85149;"
+  defp sandbox_status_style(_), do: "background: #21262d; color: #8b949e;"
+
+  defp refresh_goals(socket) do
+    case socket.assigns.current_project do
+      nil -> assign(socket, :goals, [])
+      project_id -> assign(socket, :goals, Orchid.Goals.list_for_project(project_id))
+    end
   end
 
   defp filter_agents(agents, nil), do: agents

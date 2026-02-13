@@ -1,8 +1,8 @@
 defmodule Orchid.Sandbox do
   @moduledoc """
-  Sandbox GenServer — one per agent.
+  Sandbox GenServer — one per project.
   Manages a Podman container with OverlayFS for isolated file access.
-  Registered in Orchid.Registry as {:sandbox, agent_id}.
+  Registered in Orchid.Registry as {:sandbox, project_id}.
   """
   use GenServer
   require Logger
@@ -10,7 +10,6 @@ defmodule Orchid.Sandbox do
   alias Orchid.{Project, Sandbox.Overlay}
 
   defstruct [
-    :agent_id,
     :project_id,
     :container_name,
     :lower_path,
@@ -24,57 +23,57 @@ defmodule Orchid.Sandbox do
 
   # Client API
 
-  def start_link({agent_id, project_id}) do
-    GenServer.start_link(__MODULE__, {agent_id, project_id},
-      name: {:via, Registry, {Orchid.Registry, {:sandbox, agent_id}}}
+  def start_link(project_id) do
+    GenServer.start_link(__MODULE__, project_id,
+      name: {:via, Registry, {Orchid.Registry, {:sandbox, project_id}}}
     )
   end
 
-  def child_spec({agent_id, project_id}) do
+  def child_spec(project_id) do
     %{
-      id: {__MODULE__, agent_id},
-      start: {__MODULE__, :start_link, [{agent_id, project_id}]},
+      id: {__MODULE__, project_id},
+      start: {__MODULE__, :start_link, [project_id]},
       restart: :temporary
     }
   end
 
-  def exec(agent_id, command, opts \\ []) do
-    call(agent_id, {:exec, command, opts})
+  def exec(project_id, command, opts \\ []) do
+    call(project_id, {:exec, command, opts})
   end
 
-  def read_file(agent_id, path) do
-    call(agent_id, {:read_file, path})
+  def read_file(project_id, path) do
+    call(project_id, {:read_file, path})
   end
 
-  def write_file(agent_id, path, content) do
-    call(agent_id, {:write_file, path, content})
+  def write_file(project_id, path, content) do
+    call(project_id, {:write_file, path, content})
   end
 
-  def edit_file(agent_id, path, old_string, new_string) do
-    call(agent_id, {:edit_file, path, old_string, new_string})
+  def edit_file(project_id, path, old_string, new_string) do
+    call(project_id, {:edit_file, path, old_string, new_string})
   end
 
-  def list_files(agent_id, path \\ "/workspace") do
-    call(agent_id, {:list_files, path})
+  def list_files(project_id, path \\ "/workspace") do
+    call(project_id, {:list_files, path})
   end
 
-  def grep_files(agent_id, pattern, path \\ "/workspace", opts \\ []) do
-    call(agent_id, {:grep_files, pattern, path, opts})
+  def grep_files(project_id, pattern, path \\ "/workspace", opts \\ []) do
+    call(project_id, {:grep_files, pattern, path, opts})
   end
 
-  def reset(agent_id) do
-    call(agent_id, :reset)
+  def reset(project_id) do
+    call(project_id, :reset)
   end
 
-  def stop(agent_id) do
-    case Registry.lookup(Orchid.Registry, {:sandbox, agent_id}) do
+  def stop(project_id) do
+    case Registry.lookup(Orchid.Registry, {:sandbox, project_id}) do
       [{pid, _}] -> GenServer.stop(pid)
       [] -> :ok
     end
   end
 
-  def status(agent_id) do
-    case Registry.lookup(Orchid.Registry, {:sandbox, agent_id}) do
+  def status(project_id) do
+    case Registry.lookup(Orchid.Registry, {:sandbox, project_id}) do
       [{pid, _}] -> GenServer.call(pid, :status)
       [] -> nil
     end
@@ -83,10 +82,10 @@ defmodule Orchid.Sandbox do
   # GenServer callbacks
 
   @impl true
-  def init({agent_id, project_id}) do
+  def init(project_id) do
     data_dir = Project.data_dir() |> Path.expand()
     lower = Project.files_path(project_id) |> Path.expand()
-    base = Path.join([data_dir, "sandboxes", agent_id])
+    base = Path.join([data_dir, "sandboxes", project_id])
     upper = Path.join(base, "upper")
     work = Path.join(base, "work")
     merged = Path.join(base, "merged")
@@ -97,10 +96,9 @@ defmodule Orchid.Sandbox do
     Project.ensure_dir(project_id)
 
     image = get_image()
-    container_name = "orchid-#{agent_id}"
+    container_name = "orchid-project-#{project_id}"
 
     state = %__MODULE__{
-      agent_id: agent_id,
       project_id: project_id,
       container_name: container_name,
       lower_path: lower,
@@ -259,8 +257,8 @@ defmodule Orchid.Sandbox do
 
   # Private
 
-  defp call(agent_id, msg) do
-    case Registry.lookup(Orchid.Registry, {:sandbox, agent_id}) do
+  defp call(project_id, msg) do
+    case Registry.lookup(Orchid.Registry, {:sandbox, project_id}) do
       [{pid, _}] -> GenServer.call(pid, msg, 60_000)
       [] -> {:error, :sandbox_not_found}
     end
@@ -274,18 +272,18 @@ defmodule Orchid.Sandbox do
     # Try primary approach: podman with in-container overlay mount
     case try_overlay_container(state) do
       {:ok, new_state} ->
-        Logger.info("Sandbox #{state.agent_id}: overlay container started")
+        Logger.info("Sandbox project-#{state.project_id}: overlay container started")
         new_state
 
       {:error, reason} ->
-        Logger.warning("Sandbox #{state.agent_id}: overlay failed (#{reason}), trying fallback")
+        Logger.warning("Sandbox project-#{state.project_id}: overlay failed (#{reason}), trying fallback")
         case try_fallback_container(state) do
           {:ok, new_state} ->
-            Logger.info("Sandbox #{state.agent_id}: fallback container started (union mode)")
+            Logger.info("Sandbox project-#{state.project_id}: fallback container started (union mode)")
             new_state
 
           {:error, reason2} ->
-            Logger.error("Sandbox #{state.agent_id}: all container methods failed: #{reason2}")
+            Logger.error("Sandbox project-#{state.project_id}: all container methods failed: #{reason2}")
             %{state | status: :error, overlay_method: :union}
         end
     end

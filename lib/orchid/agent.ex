@@ -97,9 +97,10 @@ defmodule Orchid.Agent do
 
   @doc """
   Get the current state of an agent.
+  Optional timeout (ms or :infinity, default :infinity).
   """
-  def get_state(agent_id) do
-    call(agent_id, :get_state)
+  def get_state(agent_id, timeout \\ :infinity) do
+    call(agent_id, :get_state, timeout)
   end
 
   @doc """
@@ -163,33 +164,23 @@ defmodule Orchid.Agent do
       project_id: config[:project_id]
     }
 
-    Store.put_agent_state(id, state)
-
-    if state.project_id do
-      {:ok, state, {:continue, :start_sandbox}}
-    else
-      {:ok, state}
-    end
-  end
-
-  @impl true
-  def handle_continue(:start_sandbox, state) do
     state =
-      case DynamicSupervisor.start_child(
-             Orchid.AgentSupervisor,
-             {Orchid.Sandbox, {state.id, state.project_id}}
-           ) do
-        {:ok, _pid} ->
-          sandbox_status = Orchid.Sandbox.status(state.id)
-          %{state | sandbox: sandbox_status}
+      if state.project_id do
+        case Orchid.Projects.ensure_sandbox(state.project_id) do
+          {:ok, _} ->
+            sandbox_status = Orchid.Sandbox.status(state.project_id)
+            %{state | sandbox: sandbox_status}
 
-        {:error, reason} ->
-          Logger.warning("Agent #{state.id}: sandbox failed to start: #{inspect(reason)}")
-          state
+          {:error, reason} ->
+            Logger.warning("Agent #{id}: sandbox failed to start: #{inspect(reason)}")
+            state
+        end
+      else
+        state
       end
 
-    Store.put_agent_state(state.id, state)
-    {:noreply, state}
+    Store.put_agent_state(id, state)
+    {:ok, state}
   end
 
   @impl true
@@ -214,8 +205,8 @@ defmodule Orchid.Agent do
   end
 
   def handle_call(:reset_sandbox, _from, state) do
-    if state.sandbox do
-      case Orchid.Sandbox.reset(state.id) do
+    if state.project_id do
+      case Orchid.Sandbox.reset(state.project_id) do
         {:ok, status} ->
           new_state = %{state | sandbox: status}
           Store.put_agent_state(state.id, new_state)
@@ -281,7 +272,6 @@ defmodule Orchid.Agent do
 
   @impl true
   def terminate(_reason, state) do
-    if state.sandbox, do: Orchid.Sandbox.stop(state.id)
     Store.delete_agent_state(state.id)
     :ok
   end
@@ -290,10 +280,17 @@ defmodule Orchid.Agent do
 
   defp via(id), do: {:via, Registry, {Orchid.Registry, id}}
 
-  defp call(agent_id, msg) do
+  defp call(agent_id, msg, timeout \\ :infinity) do
     case Registry.lookup(Orchid.Registry, agent_id) do
-      [{pid, _}] -> GenServer.call(pid, msg, :infinity)
-      [] -> {:error, :not_found}
+      [{pid, _}] ->
+        try do
+          GenServer.call(pid, msg, timeout)
+        catch
+          :exit, {:timeout, _} -> {:error, :timeout}
+        end
+
+      [] ->
+        {:error, :not_found}
     end
   end
 

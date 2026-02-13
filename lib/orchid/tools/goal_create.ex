@@ -3,6 +3,7 @@ defmodule Orchid.Tools.GoalCreate do
   @behaviour Orchid.Tool
 
   alias Orchid.Object
+  alias Orchid.Tools.GoalHelpers
 
   @impl true
   def name, do: "goal_create"
@@ -25,12 +26,12 @@ defmodule Orchid.Tools.GoalCreate do
         },
         parent_goal_id: %{
           type: "string",
-          description: "ID of the parent goal (for subgoals)"
+          description: "Goal ID or name of the parent goal (for subgoals)"
         },
         depends_on: %{
           type: "array",
           items: %{type: "string"},
-          description: "List of goal IDs this goal depends on"
+          description: "List of goal IDs or names this goal depends on"
         }
       },
       required: ["name"]
@@ -41,8 +42,8 @@ defmodule Orchid.Tools.GoalCreate do
   def execute(%{"name" => name} = args, %{agent_state: %{id: agent_id, project_id: project_id}})
       when not is_nil(project_id) do
     description = args["description"] || ""
-    parent_goal_id = args["parent_goal_id"]
-    depends_on = args["depends_on"] || []
+    parent_goal_id = GoalHelpers.resolve_goal_ref(args["parent_goal_id"], project_id)
+    depends_on = GoalHelpers.resolve_goal_refs(args["depends_on"], project_id)
 
     metadata = %{
       project_id: project_id,

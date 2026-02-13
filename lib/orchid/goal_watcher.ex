@@ -46,7 +46,9 @@ defmodule Orchid.GoalWatcher do
       end)
       |> MapSet.new()
 
-    for project <- projects, project.id not in agent_project_ids do
+    for project <- projects,
+        project.id not in agent_project_ids,
+        project.metadata[:status] in [nil, :active] do
       goals = Orchid.Object.list_goals_for_project(project.id)
       pending = Enum.filter(goals, fn g -> g.metadata[:status] != :completed end)
 
@@ -63,10 +65,27 @@ defmodule Orchid.GoalWatcher do
         log("ERROR: no Planner template found, skipping project \"#{project.name}\"")
 
       planner ->
+        # Build goal summary for system prompt interpolation
+        goal_summary =
+          pending_goals
+          |> Enum.map(fn g ->
+            deps = g.metadata[:depends_on] || []
+            dep_str = if deps == [], do: "", else: " (depends on: #{Enum.join(deps, ", ")})"
+            desc_str = if g.content != "", do: "\n  #{g.content}", else: ""
+            "- #{g.name} [#{g.id}]#{dep_str}#{desc_str}"
+          end)
+          |> Enum.join("\n")
+
+        # Substitute placeholders in the template system prompt
+        system_prompt =
+          planner.content
+          |> String.replace("{project name}", project.name)
+          |> String.replace("{goals list}", goal_summary)
+
         config = %{
           model: planner.metadata[:model] || :opus,
           provider: planner.metadata[:provider] || :cli,
-          system_prompt: planner.content,
+          system_prompt: system_prompt,
           template_id: planner.id,
           project_id: project.id
         }
@@ -81,23 +100,8 @@ defmodule Orchid.GoalWatcher do
               log("  assigned goal \"#{goal.name}\" [#{goal.id}] -> #{agent_id}")
             end
 
-            # Build a summary of all pending goals so the planner sees the full picture
-            goal_summary =
-              pending_goals
-              |> Enum.map(fn g ->
-                deps = g.metadata[:depends_on] || []
-                dep_str = if deps == [], do: "", else: " (depends on: #{Enum.join(deps, ", ")})"
-                "- #{g.name} [#{g.id}]#{dep_str}"
-              end)
-              |> Enum.join("\n")
-
             message = """
-            You are the orchestrator for project "#{project.name}".
-
-            The following goals need work:
-            #{goal_summary}
-
-            Start by calling the `goal_list` tool to see the current goals, then use `goal_create` to decompose them into actionable subgoals. Use `goal_update` to set dependencies. Do NOT just describe what you would do — actually call the tools now.
+            Begin your Standard Operating Procedure now. Inspect the workspace, synchronize with the goal registry, and execute.
             """
 
             Task.start(fn ->

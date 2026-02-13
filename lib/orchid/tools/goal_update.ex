@@ -3,6 +3,7 @@ defmodule Orchid.Tools.GoalUpdate do
   @behaviour Orchid.Tool
 
   alias Orchid.Object
+  alias Orchid.Tools.GoalHelpers
 
   @impl true
   def name, do: "goal_update"
@@ -17,7 +18,7 @@ defmodule Orchid.Tools.GoalUpdate do
       properties: %{
         id: %{
           type: "string",
-          description: "The ID of the goal to update"
+          description: "Goal ID or name of the goal to update"
         },
         status: %{
           type: "string",
@@ -27,7 +28,7 @@ defmodule Orchid.Tools.GoalUpdate do
         depends_on: %{
           type: "array",
           items: %{type: "string"},
-          description: "New list of goal IDs this goal depends on"
+          description: "New list of goal IDs or names this goal depends on"
         },
         name: %{
           type: "string",
@@ -39,13 +40,22 @@ defmodule Orchid.Tools.GoalUpdate do
   end
 
   @impl true
-  def execute(%{"id" => id} = args, _context) do
+  def execute(%{"id" => id_ref} = args, %{agent_state: %{project_id: project_id}}) do
+    id = GoalHelpers.resolve_goal_ref(id_ref, project_id) || id_ref
+
     case Object.get(id) do
       {:ok, obj} when obj.type == :goal ->
+        resolved_deps =
+          if args["depends_on"] do
+            GoalHelpers.resolve_goal_refs(args["depends_on"], project_id || obj.metadata[:project_id])
+          else
+            nil
+          end
+
         metadata_updates =
           %{}
           |> maybe_put(:status, args["status"], &String.to_existing_atom/1)
-          |> maybe_put(:depends_on, args["depends_on"])
+          |> maybe_put(:depends_on, resolved_deps)
 
         # Update metadata if there are changes
         if metadata_updates != %{} do
@@ -64,7 +74,44 @@ defmodule Orchid.Tools.GoalUpdate do
         {:error, "Object #{id} is not a goal"}
 
       {:error, :not_found} ->
-        {:error, "Goal not found: #{id}"}
+        {:error, "Goal not found: #{id_ref}"}
+    end
+  end
+
+  def execute(%{"id" => id_ref} = args, _context) do
+    # Fallback for calls without agent_state (shouldn't normally happen)
+    case Object.get(id_ref) do
+      {:ok, obj} when obj.type == :goal ->
+        project_id = obj.metadata[:project_id]
+
+        resolved_deps =
+          if args["depends_on"] do
+            GoalHelpers.resolve_goal_refs(args["depends_on"], project_id)
+          else
+            nil
+          end
+
+        metadata_updates =
+          %{}
+          |> maybe_put(:status, args["status"], &String.to_existing_atom/1)
+          |> maybe_put(:depends_on, resolved_deps)
+
+        if metadata_updates != %{} do
+          {:ok, _} = Object.update_metadata(id_ref, metadata_updates)
+        end
+
+        if args["name"] do
+          {:ok, updated} = Object.get(id_ref)
+          :ok = Orchid.Store.put_object(%{updated | name: args["name"], updated_at: DateTime.utc_now()})
+        end
+
+        {:ok, "Updated goal: #{args["name"] || obj.name} (ID: #{id_ref})"}
+
+      {:ok, _obj} ->
+        {:error, "Object #{id_ref} is not a goal"}
+
+      {:error, :not_found} ->
+        {:error, "Goal not found: #{id_ref}"}
     end
   end
 

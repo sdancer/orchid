@@ -24,7 +24,8 @@ defmodule Orchid.Tool do
     Orchid.Tools.GoalRead,
     Orchid.Tools.GoalCreate,
     Orchid.Tools.GoalUpdate,
-    Orchid.Tools.SandboxReset
+    Orchid.Tools.SandboxReset,
+    Orchid.Tools.AgentSpawn
   ]
 
   @sandboxed_tools ~w(shell read edit list grep)
@@ -68,23 +69,23 @@ defmodule Orchid.Tool do
   defp sandbox_active?(_), do: false
 
   defp execute_in_sandbox(name, args, ctx) do
-    aid = ctx.agent_state.id
+    pid = ctx.agent_state.project_id
 
     case name do
       "shell" ->
-        Orchid.Sandbox.exec(aid, args["command"], timeout: args["timeout"] || 30_000)
+        Orchid.Sandbox.exec(pid, args["command"], timeout: args["timeout"] || 30_000)
 
       "read" ->
-        Orchid.Sandbox.read_file(aid, args["path"])
+        Orchid.Sandbox.read_file(pid, args["path"])
 
       "edit" ->
-        Orchid.Sandbox.edit_file(aid, args["path"], args["old_string"], args["new_string"])
+        Orchid.Sandbox.edit_file(pid, args["path"], args["old_string"], args["new_string"])
 
       "list" ->
-        Orchid.Sandbox.list_files(aid, args["path"] || "/workspace")
+        Orchid.Sandbox.list_files(pid, args["path"] || "/workspace")
 
       "grep" ->
-        Orchid.Sandbox.grep_files(aid, args["pattern"], args["path"] || "/workspace", glob: args["glob"])
+        Orchid.Sandbox.grep_files(pid, args["pattern"], args["path"] || "/workspace", glob: args["glob"])
     end
   end
 end
