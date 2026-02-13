@@ -252,6 +252,10 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, assign(socket, :template_name, name)}
   end
 
+  def handle_event("update_template_model", %{"model" => ""}, socket) do
+    {:noreply, assign(socket, :template_model, nil)}
+  end
+
   def handle_event("update_template_model", %{"model" => model}, socket) do
     {:noreply, assign(socket, :template_model, String.to_existing_atom(model))}
   end
@@ -875,9 +879,11 @@ defmodule OrchidWeb.AgentLive do
                   <div style="flex: 1;">
                     <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">Model</label>
                     <select class="sidebar-search" style="width: 100%;" phx-change="update_template_model" name="model">
+                      <option value="" selected={@template_model == nil}>Default</option>
                       <option value="opus" selected={@template_model == :opus}>Opus</option>
                       <option value="sonnet" selected={@template_model == :sonnet}>Sonnet</option>
                       <option value="haiku" selected={@template_model == :haiku}>Haiku</option>
+                      <option value="gpt53" selected={@template_model == :gpt53}>GPT 5.3</option>
                       <option value="gemini_pro" selected={@template_model == :gemini_pro}>Gemini Pro</option>
                       <option value="gemini_flash" selected={@template_model == :gemini_flash}>Gemini Flash</option>
                       <option value="gemini_flash_image" selected={@template_model == :gemini_flash_image}>Gemini Flash Image</option>
