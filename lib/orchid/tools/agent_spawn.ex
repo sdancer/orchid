@@ -49,12 +49,16 @@ defmodule Orchid.Tools.AgentSpawn do
 
       template ->
         config = %{
-          model: template.metadata[:model] || :opus,
           provider: template.metadata[:provider] || :cli,
           system_prompt: template.content,
           template_id: template.id,
           project_id: project_id
         }
+
+        # Only set model if template specifies one — providers have their own defaults
+        config = if template.metadata[:model],
+          do: Map.put(config, :model, template.metadata[:model]),
+          else: config
 
         # Pass through extra template metadata flags
         config = if template.metadata[:use_orchid_tools],
