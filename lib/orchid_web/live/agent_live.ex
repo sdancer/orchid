@@ -143,12 +143,14 @@ defmodule OrchidWeb.AgentLive do
     config =
       case Orchid.Object.get(template_id) do
         {:ok, template} ->
-          %{
-            model: template.metadata[:model] || :opus,
+          config = %{
             provider: template.metadata[:provider] || :cli,
             system_prompt: template.content,
             template_id: template_id
           }
+          if template.metadata[:model],
+            do: Map.put(config, :model, template.metadata[:model]),
+            else: config
 
         _ ->
           # Fallback (shouldn't happen with UI validation)
@@ -200,7 +202,7 @@ defmodule OrchidWeb.AgentLive do
         {:ok, template} ->
           socket
           |> assign(:selected_template, id)
-          |> assign(:model, template.metadata[:model] || :opus)
+          |> assign(:model, template.metadata[:model])
           |> assign(:provider, template.metadata[:provider] || :cli)
 
         _ ->
@@ -221,7 +223,7 @@ defmodule OrchidWeb.AgentLive do
           case Orchid.Object.get(template_id) do
             {:ok, template} ->
               {
-                template.metadata[:model] || :opus,
+                template.metadata[:model],
                 template.metadata[:provider] || :cli,
                 template.content || ""
               }
@@ -925,7 +927,7 @@ defmodule OrchidWeb.AgentLive do
                   <span style="color: #6e7681;">•</span>
                   <span style="color: #7ee787;"><%= @current_agent_template.category %></span>
                   <span style="color: #6e7681;">•</span>
-                  <span style="color: #8b949e;"><%= @current_agent_template.provider %> / <%= @current_agent_template.model %></span>
+                  <span style="color: #8b949e;"><%= @current_agent_template.provider %><%= if @current_agent_template.model, do: " / #{@current_agent_template.model}" %></span>
                   <%= if @system_prompt do %>
                     <button
                       class="btn btn-secondary btn-sm"
