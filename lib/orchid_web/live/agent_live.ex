@@ -863,6 +863,7 @@ defmodule OrchidWeb.AgentLive do
                     <label style="display: block; color: #8b949e; margin-bottom: 0.25rem; font-size: 0.85rem;">Provider</label>
                     <select class="sidebar-search" style="width: 100%;" phx-change="update_template_provider" name="provider">
                       <option value="cli" selected={@template_provider == :cli}>CLI</option>
+                      <option value="codex" selected={@template_provider == :codex}>Codex</option>
                       <option value="oauth" selected={@template_provider == :oauth}>API</option>
                       <option value="gemini" selected={@template_provider == :gemini}>Gemini</option>
                       <option value="cerebras" selected={@template_provider == :cerebras}>Cerebras</option>
