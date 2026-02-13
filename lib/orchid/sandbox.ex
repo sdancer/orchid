@@ -207,7 +207,7 @@ defmodule Orchid.Sandbox do
 
   def handle_call(:reset, _from, state) do
     destroy_container(state)
-    new_state = start_container(%{state | status: :starting})
+    new_state = start_container(%{state | status: :starting, image: get_image()})
     Registry.update_value(Orchid.Registry, {:sandbox, state.project_id}, fn _ -> new_state.overlay_method end)
     {:reply, {:ok, %{status: new_state.status}}, new_state}
   end
