@@ -44,11 +44,13 @@ defmodule Orchid.LLM.CLI do
       {:ok, content} ->
         if String.starts_with?(content, "Error:") or String.starts_with?(content, "error:") do
           Logger.error("CLI error: #{String.slice(content, 0, 500)}")
+          {:error, {:api_error, content}}
+        else
+          {:ok, %{content: content, tool_calls: nil}}
         end
-        {:ok, %{content: content, tool_calls: nil}}
 
       nil ->
-        Logger.error("CLI timeout after 600s")
+        Logger.error("CLI timeout after #{div(timeout, 1000)}s")
         {:error, :timeout}
     end
   end

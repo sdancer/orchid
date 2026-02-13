@@ -38,8 +38,10 @@ defmodule Orchid.LLM.Codex do
       {:ok, content} ->
         if String.starts_with?(content, "Error:") or String.starts_with?(content, "error:") do
           Logger.error("Codex error: #{String.slice(content, 0, 500)}")
+          {:error, {:api_error, content}}
+        else
+          {:ok, %{content: content, tool_calls: nil}}
         end
-        {:ok, %{content: content, tool_calls: nil}}
 
       nil ->
         Logger.error("Codex timeout after 600s")
