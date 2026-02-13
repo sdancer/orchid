@@ -1,7 +1,9 @@
 defmodule Orchid.GoalWatcher do
   @moduledoc """
   Periodically checks for projects that have pending goals but no running agents.
-  Spawns exactly one Planner agent per project to orchestrate all goals.
+  Spawns a Planner agent per project to orchestrate goals.
+  Also detects dead agents (assigned to goals but no longer running) and
+  re-kicks idle agents that still have unfinished work.
   """
   use GenServer
   require Logger
@@ -34,27 +36,105 @@ defmodule Orchid.GoalWatcher do
 
   defp check_projects do
     projects = Orchid.Object.list_projects()
-    running_agents = Orchid.Agent.list()
+    running_agent_ids = MapSet.new(Orchid.Agent.list())
 
-    agent_project_ids =
-      running_agents
-      |> Enum.map(fn id ->
-        case Orchid.Agent.get_state(id) do
-          {:ok, s} -> s.project_id
-          _ -> nil
+    # Build map of running agent states keyed by project_id
+    agent_states =
+      running_agent_ids
+      |> Enum.reduce(%{}, fn id, acc ->
+        case Orchid.Agent.get_state(id, 2000) do
+          {:ok, state} when not is_nil(state.project_id) ->
+            Map.update(acc, state.project_id, [state], &[state | &1])
+
+          _ ->
+            acc
         end
       end)
-      |> MapSet.new()
 
     for project <- projects,
-        project.id not in agent_project_ids,
         project.metadata[:status] in [nil, :active] do
       goals = Orchid.Object.list_goals_for_project(project.id)
       pending = Enum.filter(goals, fn g -> g.metadata[:status] != :completed end)
 
       if pending != [] do
-        log("project \"#{project.name}\" has #{length(pending)} pending goal(s), 0 agents — spawning planner")
-        spawn_planner(project, pending)
+        project_agents = Map.get(agent_states, project.id, [])
+        handle_project(project, pending, project_agents, running_agent_ids)
+      end
+    end
+  end
+
+  defp handle_project(project, pending_goals, project_agents, running_agent_ids) do
+    # 1. Clean up goals assigned to dead agents
+    orphaned =
+      Enum.filter(pending_goals, fn g ->
+        aid = g.metadata[:agent_id]
+        aid != nil and aid not in running_agent_ids
+      end)
+
+    if orphaned != [] do
+      log("project \"#{project.name}\": #{length(orphaned)} goal(s) assigned to dead agents — clearing assignments")
+
+      for goal <- orphaned do
+        Orchid.Object.update_metadata(goal.id, %{agent_id: nil})
+        log("  cleared dead agent from goal \"#{goal.name}\" [#{goal.id}]")
+      end
+    end
+
+    # 2. No agents at all → spawn planner
+    if project_agents == [] do
+      # Re-fetch pending goals with cleared assignments
+      pending =
+        if orphaned != [] do
+          Orchid.Object.list_goals_for_project(project.id)
+          |> Enum.filter(fn g -> g.metadata[:status] != :completed end)
+        else
+          pending_goals
+        end
+
+      log("project \"#{project.name}\" has #{length(pending)} pending goal(s), 0 agents — spawning planner")
+      spawn_planner(project, pending)
+    else
+      # 3. Has idle agents with pending assigned goals → re-kick
+      re_kick_idle_agents(project, project_agents)
+    end
+  end
+
+  defp re_kick_idle_agents(project, project_agents) do
+    for agent_state <- project_agents,
+        agent_state.status == :idle do
+      # Check if this agent has pending goals assigned to it
+      goals = Orchid.Object.list_goals_for_project(project.id)
+
+      assigned_pending =
+        Enum.filter(goals, fn g ->
+          g.metadata[:agent_id] == agent_state.id and g.metadata[:status] != :completed
+        end)
+
+      if assigned_pending != [] do
+        goal_names = Enum.map_join(assigned_pending, ", ", & &1.name)
+
+        log(
+          "project \"#{project.name}\": agent #{agent_state.id} is idle with #{length(assigned_pending)} pending goal(s) (#{goal_names}) — re-kicking"
+        )
+
+        message = """
+        You still have pending goals assigned to you. Resume work.
+        Use `goal_list` to see current state, then continue executing.
+        """
+
+        Task.start(fn ->
+          result =
+            Orchid.Agent.stream(agent_state.id, String.trim(message), fn _chunk -> :ok end)
+
+          case result do
+            {:ok, response} ->
+              preview = response |> String.slice(0, 200) |> String.replace("\n", " ")
+              log("re-kick agent #{agent_state.id} responded: #{preview}")
+
+            {:error, reason} ->
+              log("ERROR: re-kick agent #{agent_state.id} failed: #{inspect(reason)}")
+          end
+        end)
       end
     end
   end
