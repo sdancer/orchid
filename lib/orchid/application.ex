@@ -14,10 +14,16 @@ defmodule Orchid.Application do
       # PubSub for Phoenix
       {Phoenix.PubSub, name: Orchid.PubSub},
       # Phoenix endpoint
-      OrchidWeb.Endpoint
+      OrchidWeb.Endpoint,
+      # Auto-spawn agents for projects with unattended goals
+      Orchid.GoalWatcher
     ]
 
     opts = [strategy: :one_for_one, name: Orchid.Supervisor]
-    Supervisor.start_link(children, opts)
+
+    with {:ok, pid} <- Supervisor.start_link(children, opts) do
+      Orchid.Seeds.seed_templates()
+      {:ok, pid}
+    end
   end
 end

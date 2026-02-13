@@ -20,6 +20,10 @@ defmodule Orchid.Tool do
     Orchid.Tools.PromptRead,
     Orchid.Tools.PromptCreate,
     Orchid.Tools.PromptUpdate,
+    Orchid.Tools.GoalList,
+    Orchid.Tools.GoalRead,
+    Orchid.Tools.GoalCreate,
+    Orchid.Tools.GoalUpdate,
     Orchid.Tools.SandboxReset
   ]
 

@@ -1,55 +1,38 @@
 defmodule Orchid.LLM.Gemini do
   @moduledoc """
   Google Gemini API client.
-  Handles chat completion with streaming support.
+  Handles chat completion with streaming and tool use support.
   """
   require Logger
 
   @base_url "https://generativelanguage.googleapis.com/v1beta/models"
 
   @models %{
-    gemini_pro: "gemini-3-pro-preview",
-    gemini_flash: "gemini-3-flash-preview",
-    gemini_flash_image: "gemini-2.5-flash-preview-image-generation"
+    gemini_pro: "gemini-2.5-pro",
+    gemini_flash: "gemini-2.5-flash",
+    gemini_flash_image: "gemini-2.5-flash-image"
   }
 
   @doc """
   Send a chat request to Gemini.
   """
   def chat(config, context) do
-    api_key = config[:api_key] || Orchid.Object.get_fact_value("gemini_api_key") || System.get_env("GEMINI_API_KEY")
+    with {:ok, api_key} <- get_api_key(config) do
+      model = resolve_model(config[:model])
+      url = "#{@base_url}/#{model}:generateContent"
+      body = build_request_body(config, context)
 
-    if is_nil(api_key) do
-      {:error, {:api_key_missing, "GEMINI_API_KEY not set. Add it in Settings > Facts as 'gemini_api_key', or set the GEMINI_API_KEY env var."}}
-    else
+      case Req.post(url, json: body, headers: headers(api_key), receive_timeout: 120_000) do
+        {:ok, %{status: 200, body: response}} ->
+          parse_response(response)
 
-    model = resolve_model(config[:model])
-    url = "#{@base_url}/#{model}:generateContent"
-    body = build_request_body(config, context)
+        {:ok, %{status: status, body: body}} ->
+          Logger.error("Gemini API error: #{status} - #{inspect(body)}")
+          {:error, {:api_error, status, body}}
 
-    IO.puts("[Gemini] chat request to model=#{model}")
-    IO.puts("[Gemini] url=#{url}")
-    IO.puts("[Gemini] messages count=#{length(context.messages)}")
-
-    case Req.post(url,
-           json: body,
-           headers: headers(api_key),
-           receive_timeout: 120_000
-         ) do
-      {:ok, %{status: 200, body: response}} ->
-        IO.puts("[Gemini] chat response OK (200)")
-        parse_response(response)
-
-      {:ok, %{status: status, body: body}} ->
-        IO.puts("[Gemini] chat error status=#{status}")
-        Logger.error("Gemini API error: #{status} - #{inspect(body)}")
-        {:error, {:api_error, status, body}}
-
-      {:error, reason} ->
-        IO.puts("[Gemini] chat request failed: #{inspect(reason)}")
-        Logger.error("Gemini request failed: #{inspect(reason)}")
-        {:error, reason}
-    end
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -57,51 +40,39 @@ defmodule Orchid.LLM.Gemini do
   Send a streaming chat request to Gemini.
   """
   def chat_stream(config, context, callback) do
-    api_key = config[:api_key] || Orchid.Object.get_fact_value("gemini_api_key") || System.get_env("GEMINI_API_KEY")
+    with {:ok, api_key} <- get_api_key(config) do
+      model = resolve_model(config[:model])
+      url = "#{@base_url}/#{model}:streamGenerateContent?alt=sse"
+      body = build_request_body(config, context)
 
-    if is_nil(api_key) do
-      {:error, {:api_key_missing, "GEMINI_API_KEY not set. Add it in Settings > Facts as 'gemini_api_key', or set the GEMINI_API_KEY env var."}}
-    else
+      tool_count = length(get_in(body, [:tools, Access.at(0), :function_declarations]) || [])
+      Logger.info("Gemini: sending to #{model}, #{tool_count} tools, #{length(body.contents)} messages")
 
-    model = resolve_model(config[:model])
-    url = "#{@base_url}/#{model}:streamGenerateContent?alt=sse"
-    body = build_request_body(config, context)
+      acc = %{content: "", tool_calls: [], current_tool: nil}
 
-    IO.puts("[Gemini] chat_stream request to model=#{model}")
-    IO.puts("[Gemini] stream url=#{url}")
-    IO.puts("[Gemini] messages count=#{length(context.messages)}")
+      stream_fun = fn {:data, chunk}, {req, resp} ->
+        current = Process.get(:gemini_acc, acc)
+        updated = process_stream_chunk(chunk, current, callback)
+        Process.put(:gemini_acc, updated)
+        {:cont, {req, resp}}
+      end
 
-    acc = %{content: ""}
+      case Req.post(url, json: body, headers: headers(api_key), receive_timeout: 300_000, into: stream_fun) do
+        {:ok, %{status: 200}} ->
+          final = Process.get(:gemini_acc, acc)
+          Process.delete(:gemini_acc)
+          tool_calls = if final.tool_calls == [], do: nil, else: final.tool_calls
+          Logger.info("Gemini: response complete, content=#{String.length(final.content)} chars, tool_calls=#{if tool_calls, do: length(tool_calls), else: 0}")
+          {:ok, %{content: final.content, tool_calls: tool_calls}}
 
-    stream_fun = fn {:data, chunk}, {req, resp} ->
-      acc = Process.get(:gemini_acc, acc)
-      new_acc = process_stream_chunk(chunk, acc, callback)
-      Process.put(:gemini_acc, new_acc)
-      {:cont, {req, resp}}
-    end
+        {:ok, %{status: status, body: body}} ->
+          Process.delete(:gemini_acc)
+          {:error, {:api_error, status, body}}
 
-    case Req.post(url,
-           json: body,
-           headers: headers(api_key),
-           receive_timeout: 120_000,
-           into: stream_fun
-         ) do
-      {:ok, %{status: 200}} ->
-        final_acc = Process.get(:gemini_acc, acc)
-        Process.delete(:gemini_acc)
-        IO.puts("[Gemini] stream complete, total length=#{String.length(final_acc.content)}")
-        {:ok, %{content: final_acc.content, tool_calls: nil}}
-
-      {:ok, %{status: status, body: body}} ->
-        Process.delete(:gemini_acc)
-        IO.puts("[Gemini] stream error status=#{status}")
-        {:error, {:api_error, status, body}}
-
-      {:error, reason} ->
-        Process.delete(:gemini_acc)
-        IO.puts("[Gemini] stream request failed: #{inspect(reason)}")
-        {:error, reason}
-    end
+        {:error, reason} ->
+          Process.delete(:gemini_acc)
+          {:error, reason}
+      end
     end
   end
 
@@ -120,6 +91,13 @@ defmodule Orchid.LLM.Gemini do
 
   # Private functions
 
+  defp get_api_key(config) do
+    case config[:api_key] || Orchid.Object.get_fact_value("gemini_api_key") || System.get_env("GEMINI_API_KEY") do
+      nil -> {:error, {:api_key_missing, "GEMINI_API_KEY not set. Add it in Settings > Facts as 'gemini_api_key', or set the GEMINI_API_KEY env var."}}
+      key -> {:ok, key}
+    end
+  end
+
   defp resolve_model(model) do
     Map.get(@models, model, Map.get(@models, :gemini_pro))
   end
@@ -137,18 +115,54 @@ defmodule Orchid.LLM.Gemini do
     body = %{
       contents: contents,
       generationConfig: %{
-        maxOutputTokens: Map.get(config, :max_tokens, 8192)
+        maxOutputTokens: Map.get(config, :max_tokens, 65536)
       }
     }
 
-    # Add system instruction if present
-    if context.system && context.system != "" do
-      system_text = build_system_prompt(context.system, context.objects, context.memory)
-      Map.put(body, :system_instruction, %{parts: [%{text: system_text}]})
+    # Add system instruction
+    body =
+      if context.system && context.system != "" do
+        system_text = build_system_prompt(context.system, context.objects, context.memory)
+        Map.put(body, :system_instruction, %{parts: [%{text: system_text}]})
+      else
+        body
+      end
+
+    # Add tools
+    tools = Orchid.Tool.list_tools()
+
+    if tools != [] do
+      gemini_tools =
+        Enum.map(tools, fn tool ->
+          params = sanitize_params(tool.parameters)
+          %{name: tool.name, description: tool.description, parameters: params}
+        end)
+
+      body
+      |> Map.put(:tools, [%{function_declarations: gemini_tools}])
+      |> Map.put(:tool_config, %{function_calling_config: %{mode: "AUTO"}})
     else
       body
     end
   end
+
+  # Gemini doesn't accept "required" or empty properties in certain cases
+  defp sanitize_params(params) when is_map(params) do
+    params
+    |> Map.delete(:required)
+    |> Map.delete("required")
+    |> Map.update(:properties, %{}, fn props ->
+      if props == %{}, do: %{_placeholder: %{type: "string", description: "unused"}}, else: props
+    end)
+    |> Map.update("properties", nil, fn
+      nil -> nil
+      props when props == %{} -> %{"_placeholder" => %{"type" => "string", "description" => "unused"}}
+      props -> props
+    end)
+    |> Map.reject(fn {_k, v} -> is_nil(v) end)
+  end
+
+  defp sanitize_params(params), do: params
 
   defp build_system_prompt(base_prompt, objects, memory) do
     parts = [base_prompt]
@@ -177,26 +191,76 @@ defmodule Orchid.LLM.Gemini do
 
   defp format_messages(messages) do
     messages
-    |> Enum.filter(fn msg -> msg.role in [:user, :assistant] end)
     |> Enum.map(fn msg ->
-      role =
-        case msg.role do
-          :user -> "user"
-          :assistant -> "model"
-        end
+      case msg.role do
+        :user ->
+          %{role: "user", parts: [%{text: msg.content || ""}]}
 
-      %{role: role, parts: [%{text: msg.content || ""}]}
+        :assistant ->
+          parts =
+            if msg[:tool_calls] && msg.tool_calls != [] do
+              text_parts =
+                if msg.content && msg.content != "" do
+                  [%{text: msg.content}]
+                else
+                  []
+                end
+
+              tool_parts =
+                Enum.map(msg.tool_calls, fn tc ->
+                  %{functionCall: %{name: tc.name, args: tc.arguments || %{}}}
+                end)
+
+              text_parts ++ tool_parts
+            else
+              [%{text: msg.content || ""}]
+            end
+
+          %{role: "model", parts: parts}
+
+        :tool ->
+          # Tool results go as user messages with functionResponse parts
+          %{
+            role: "user",
+            parts: [
+              %{
+                functionResponse: %{
+                  name: msg.content[:tool_name] || msg.content.tool_use_id,
+                  response: %{result: msg.content.content}
+                }
+              }
+            ]
+          }
+      end
     end)
   end
 
   defp parse_response(response) do
-    text =
-      case get_in(response, ["candidates", Access.at(0), "content", "parts", Access.at(0), "text"]) do
-        nil -> ""
-        text -> text
-      end
+    parts = get_in(response, ["candidates", Access.at(0), "content", "parts"]) || []
+    extract_parts(parts)
+  end
 
-    {:ok, %{content: text, tool_calls: nil}}
+  defp extract_parts(parts) do
+    text =
+      parts
+      |> Enum.filter(&Map.has_key?(&1, "text"))
+      |> Enum.map(& &1["text"])
+      |> Enum.join("")
+
+    tool_calls =
+      parts
+      |> Enum.filter(&Map.has_key?(&1, "functionCall"))
+      |> Enum.map(fn part ->
+        fc = part["functionCall"]
+        %{
+          id: "call_#{:crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)}",
+          name: fc["name"],
+          arguments: fc["args"] || %{}
+        }
+      end)
+
+    tool_calls = if tool_calls == [], do: nil, else: tool_calls
+    {:ok, %{content: text, tool_calls: tool_calls}}
   end
 
   defp process_stream_chunk(chunk, acc, callback) do
@@ -209,14 +273,30 @@ defmodule Orchid.LLM.Gemini do
 
           case Jason.decode(data) do
             {:ok, event} ->
-              case get_in(event, ["candidates", Access.at(0), "content", "parts", Access.at(0), "text"]) do
-                nil ->
-                  acc
+              parts = get_in(event, ["candidates", Access.at(0), "content", "parts"]) || []
 
-                text ->
-                  callback.(text)
-                  %{acc | content: acc.content <> text}
-              end
+              Enum.reduce(parts, acc, fn part, acc ->
+                cond do
+                  Map.has_key?(part, "text") ->
+                    text = part["text"]
+                    callback.(text)
+                    %{acc | content: acc.content <> text}
+
+                  Map.has_key?(part, "functionCall") ->
+                    fc = part["functionCall"]
+
+                    tc = %{
+                      id: "call_#{:crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)}",
+                      name: fc["name"],
+                      arguments: fc["args"] || %{}
+                    }
+
+                    %{acc | tool_calls: acc.tool_calls ++ [tc]}
+
+                  true ->
+                    acc
+                end
+              end)
 
             _ ->
               acc

@@ -265,6 +265,32 @@ defmodule OrchidWeb.Layouts do
             border-radius: 12px;
             font-size: 0.75rem;
           }
+          @media (max-width: 768px) {
+            .app-layout {
+              flex-direction: column;
+            }
+            .sidebar {
+              width: 100%;
+              max-height: 40vh;
+              border-right: none;
+              border-bottom: 1px solid #30363d;
+            }
+            .main-content {
+              min-height: 60vh;
+            }
+            .chat-container {
+              height: calc(100vh - 40vh - 60px);
+            }
+            .agent-list {
+              grid-template-columns: 1fr;
+            }
+            .message {
+              max-width: 95%;
+            }
+            .message.tool-result {
+              max-width: 95%;
+            }
+          }
         </style>
         <script src="https://cdn.jsdelivr.net/npm/phoenix@1.7.14/priv/static/phoenix.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/phoenix_live_view@1.1.19/priv/static/phoenix_live_view.min.js"></script>

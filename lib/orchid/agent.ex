@@ -73,17 +73,26 @@ defmodule Orchid.Agent do
   @doc """
   Run the agent with a user message.
   Executes the agent loop: LLM call -> tool calls -> repeat until done.
+  Returns immediately; caller is notified via callback or can poll get_state.
   """
   def run(agent_id, message) do
-    call(agent_id, {:run, message})
+    cast(agent_id, {:run, message, nil})
   end
 
   @doc """
   Stream a response from the agent.
   Callback receives chunks as they arrive.
+  The caller_pid receives {:agent_done, agent_id, result} when complete.
   """
   def stream(agent_id, message, callback) when is_function(callback, 1) do
-    call(agent_id, {:stream, message, callback})
+    caller = self()
+    cast(agent_id, {:run, message, {callback, caller}})
+    # Block caller until done, so existing callers keep working
+    receive do
+      {:agent_done, ^agent_id, result} -> result
+    after
+      660_000 -> {:error, :timeout}
+    end
   end
 
   @doc """
@@ -98,6 +107,7 @@ defmodule Orchid.Agent do
   """
   def list do
     Registry.select(Orchid.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+    |> Enum.filter(&is_binary/1)
   end
 
   @doc """
@@ -203,40 +213,6 @@ defmodule Orchid.Agent do
     {:reply, :ok, state}
   end
 
-  def handle_call({:run, message}, _from, state) do
-    state = %{state | status: :thinking}
-    state = add_message(state, :user, message)
-
-    case run_agent_loop(state) do
-      {:ok, response, new_state} ->
-        new_state = %{new_state | status: :idle}
-        Store.put_agent_state(new_state.id, new_state)
-        {:reply, {:ok, response}, new_state}
-
-      {:error, reason, new_state} ->
-        new_state = %{new_state | status: :idle}
-        Store.put_agent_state(new_state.id, new_state)
-        {:reply, {:error, reason}, new_state}
-    end
-  end
-
-  def handle_call({:stream, message, callback}, _from, state) do
-    state = %{state | status: :thinking}
-    state = add_message(state, :user, message)
-
-    case run_agent_loop_streaming(state, callback) do
-      {:ok, response, new_state} ->
-        new_state = %{new_state | status: :idle}
-        Store.put_agent_state(new_state.id, new_state)
-        {:reply, {:ok, response}, new_state}
-
-      {:error, reason, new_state} ->
-        new_state = %{new_state | status: :idle}
-        Store.put_agent_state(new_state.id, new_state)
-        {:reply, {:error, reason}, new_state}
-    end
-  end
-
   def handle_call(:reset_sandbox, _from, state) do
     if state.sandbox do
       case Orchid.Sandbox.reset(state.id) do
@@ -264,6 +240,46 @@ defmodule Orchid.Agent do
   end
 
   @impl true
+  def handle_cast({:run, message, notify}, state) do
+    state = %{state | status: :thinking}
+    state = add_message(state, :user, message)
+    Store.put_agent_state(state.id, state)
+
+    agent_pid = self()
+    agent_id = state.id
+
+    {callback, caller} =
+      case notify do
+        {cb, caller_pid} -> {cb, caller_pid}
+        nil -> {fn _chunk -> :ok end, nil}
+      end
+
+    Task.start(fn ->
+      result =
+        case run_agent_loop_streaming(state, callback) do
+          {:ok, response, new_state} ->
+            send(agent_pid, {:work_done, new_state, {:ok, response}})
+            {:ok, response}
+
+          {:error, reason, new_state} ->
+            send(agent_pid, {:work_done, new_state, {:error, reason}})
+            {:error, reason}
+        end
+
+      if caller, do: send(caller, {:agent_done, agent_id, result})
+    end)
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:work_done, new_state, _result}, _state) do
+    new_state = %{new_state | status: :idle}
+    Store.put_agent_state(new_state.id, new_state)
+    {:noreply, new_state}
+  end
+
+  @impl true
   def terminate(_reason, state) do
     if state.sandbox, do: Orchid.Sandbox.stop(state.id)
     Store.delete_agent_state(state.id)
@@ -277,6 +293,13 @@ defmodule Orchid.Agent do
   defp call(agent_id, msg) do
     case Registry.lookup(Orchid.Registry, agent_id) do
       [{pid, _}] -> GenServer.call(pid, msg, :infinity)
+      [] -> {:error, :not_found}
+    end
+  end
+
+  defp cast(agent_id, msg) do
+    case Registry.lookup(Orchid.Registry, agent_id) do
+      [{pid, _}] -> GenServer.cast(pid, msg)
       [] -> {:error, :not_found}
     end
   end
@@ -299,44 +322,6 @@ defmodule Orchid.Agent do
     }
 
     %{state | messages: state.messages ++ [message]}
-  end
-
-  defp run_agent_loop(state, max_iterations \\ 10) do
-    do_run_loop(state, max_iterations, nil)
-  end
-
-  defp do_run_loop(state, 0, last_response) do
-    {:ok, last_response || "Max iterations reached", state}
-  end
-
-  defp do_run_loop(state, iterations_left, _last_response) do
-    context = build_context(state)
-    config = build_llm_config(state)
-
-    case LLM.chat(config, context) do
-      {:ok, %{content: content, tool_calls: nil}} ->
-        state = add_assistant_message(state, content)
-        {:ok, content, state}
-
-      {:ok, %{content: content, tool_calls: tool_calls}} when is_list(tool_calls) ->
-        state = add_assistant_message(state, content, tool_calls)
-        state = %{state | status: :executing_tool}
-
-        # Execute each tool call
-        {state, tool_results} = execute_tool_calls(state, tool_calls)
-
-        # Add tool results as messages
-        state =
-          Enum.reduce(tool_results, state, fn result, acc ->
-            add_message(acc, :tool, result)
-          end)
-
-        # Continue the loop
-        do_run_loop(state, iterations_left - 1, content)
-
-      {:error, reason} ->
-        {:error, reason, state}
-    end
   end
 
   defp run_agent_loop_streaming(state, callback, max_iterations \\ 10) do
@@ -448,6 +433,7 @@ defmodule Orchid.Agent do
 
     formatted_result = %{
       tool_use_id: tool_id,
+      tool_name: name,
       content: format_tool_result(result)
     }
 

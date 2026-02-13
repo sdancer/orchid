@@ -360,16 +360,16 @@ defmodule OrchidWeb.PromptsLive do
 
                 <%= if @creating_goal do %>
                   <form phx-submit="create_goal" phx-change="update_new_goal_name" style="margin-bottom: 1rem;">
+                    <input
+                      type="text"
+                      name="name"
+                      value={@new_goal_name}
+                      placeholder="Goal name"
+                      class="sidebar-search"
+                      style="width: 100%; margin-bottom: 0.5rem;"
+                      autofocus
+                    />
                     <div style="display: flex; gap: 0.5rem;">
-                      <input
-                        type="text"
-                        name="name"
-                        value={@new_goal_name}
-                        placeholder="Goal name"
-                        class="sidebar-search"
-                        style="flex: 1;"
-                        autofocus
-                      />
                       <button type="submit" class="btn btn-sm">Add</button>
                       <button type="button" class="btn btn-secondary btn-sm" phx-click="cancel_new_goal">Cancel</button>
                     </div>

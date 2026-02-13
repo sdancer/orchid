@@ -25,16 +25,20 @@ defmodule Orchid.LLM.CLI do
 
     # Run in a Task to avoid blocking the caller
     task = Task.async(fn ->
-      cmd = build_shell_command(args)
+      cmd = build_shell_command(args, config) <> " 2>&1"
+      Logger.info("CLI exec: #{String.slice(cmd, 0, 200)}")
       output = :os.cmd(String.to_charlist(cmd))
-      to_string(output) |> String.trim()
+      result = to_string(output) |> String.trim()
+      Logger.info("CLI result (#{byte_size(result)} bytes): #{String.slice(result, 0, 200)}")
+      result
     end)
 
-    case Task.yield(task, 120_000) || Task.shutdown(task) do
+    case Task.yield(task, 600_000) || Task.shutdown(task) do
       {:ok, content} ->
         {:ok, %{content: content, tool_calls: nil}}
 
       nil ->
+        Logger.error("CLI timeout after 600s")
         {:error, :timeout}
     end
   end
@@ -56,10 +60,19 @@ defmodule Orchid.LLM.CLI do
     end
   end
 
-  defp build_shell_command(args) do
+  defp build_shell_command(args, config) do
     claude_path = System.find_executable("claude") || "claude"
     escaped_args = Enum.map(args, &shell_escape/1)
-    "#{claude_path} #{Enum.join(escaped_args, " ")}"
+    cmd = "#{claude_path} #{Enum.join(escaped_args, " ")}"
+
+    case config[:project_id] do
+      nil ->
+        cmd
+
+      project_id ->
+        dir = Orchid.Project.files_path(project_id) |> Path.expand()
+        "cd #{shell_escape(dir)} && #{cmd}"
+    end
   end
 
   defp shell_escape(arg) do
@@ -122,13 +135,10 @@ defmodule Orchid.LLM.CLI do
           args
       end
 
-    # Max turns for agentic mode
-    args =
-      if config[:max_turns] do
-        args ++ ["--max-turns", to_string(config[:max_turns])]
-      else
-        args
-      end
+    # Max turns — default to 5 to allow a few tool calls + final response
+    # (Orchid's agent loop handles higher-level iteration)
+    max_turns = config[:max_turns] || 5
+    args = args ++ ["--max-turns", to_string(max_turns)]
 
     # Allowed tools
     args =

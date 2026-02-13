@@ -26,6 +26,8 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:new_goal_name, "")
       |> assign(:editing_goal, nil)
       |> assign(:adding_dependency_to, nil)
+      |> assign(:assigning_goal, nil)
+      |> assign(:goals_view_mode, :list)
       |> assign(:templates, Orchid.Object.list_agent_templates())
       |> then(fn s ->
         templates = s.assigns.templates
@@ -41,6 +43,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:template_category, "General")
       |> assign(:sandbox_active, false)
       |> assign(:sandbox_status, nil)
+      |> assign(:agent_status, :idle)
 
     socket =
       if agent_id do
@@ -48,6 +51,7 @@ defmodule OrchidWeb.AgentLive do
           {:ok, state} ->
             socket
             |> assign(:messages, format_messages(state.messages))
+            |> assign(:agent_status, state.status)
             |> assign(:sandbox_active, state.sandbox != nil)
             |> assign(:sandbox_status, state.sandbox && state.sandbox[:status])
 
@@ -57,6 +61,10 @@ defmodule OrchidWeb.AgentLive do
       else
         socket
       end
+
+    if connected?(socket) do
+      Process.send_after(self(), :poll_agent_status, 2000)
+    end
 
     {:ok, socket}
   end
@@ -500,6 +508,40 @@ defmodule OrchidWeb.AgentLive do
     end
   end
 
+  def handle_event("toggle_goals_view", _params, socket) do
+    mode = if socket.assigns.goals_view_mode == :list, do: :graph, else: :list
+    {:noreply, assign(socket, :goals_view_mode, mode)}
+  end
+
+  def handle_event("start_assign_goal", %{"id" => id}, socket) do
+    {:noreply, assign(socket, :assigning_goal, id)}
+  end
+
+  def handle_event("cancel_assign_goal", _params, socket) do
+    {:noreply, assign(socket, :assigning_goal, nil)}
+  end
+
+  def handle_event("assign_goal_to_agent", %{"goal-id" => goal_id, "agent-id" => agent_id}, socket) do
+    case Orchid.Object.get(goal_id) do
+      {:ok, goal} ->
+        {:ok, _} = Orchid.Object.update_metadata(goal_id, %{agent_id: agent_id})
+
+        # Send the goal as a message to the agent
+        message = "Work on goal: #{goal.name}\nGoal ID: #{goal_id}"
+        Task.start(fn ->
+          Orchid.Agent.stream(agent_id, message, fn _chunk -> :ok end)
+        end)
+
+        {:noreply,
+         socket
+         |> assign(:goals, Orchid.Object.list_goals_for_project(socket.assigns.current_project))
+         |> assign(:assigning_goal, nil)}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
   def handle_event("reset_sandbox", _params, socket) do
     agent_id = socket.assigns.current_agent
 
@@ -634,6 +676,28 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, socket}
   end
 
+  def handle_info(:poll_agent_status, socket) do
+    socket =
+      case socket.assigns.current_agent do
+        nil ->
+          socket
+
+        agent_id ->
+          case Orchid.Agent.get_state(agent_id) do
+            {:ok, state} ->
+              socket
+              |> assign(:agent_status, state.status)
+              |> assign(:messages, format_messages(state.messages))
+
+            _ ->
+              socket
+          end
+      end
+
+    Process.send_after(self(), :poll_agent_status, 2000)
+    {:noreply, socket}
+  end
+
   defp format_error({:api_error, status, body}) do
     "API Error #{status}: #{inspect(body)}"
   end
@@ -646,7 +710,10 @@ defmodule OrchidWeb.AgentLive do
     <div class="app-layout">
       <div class="sidebar">
         <div class="sidebar-header">
-          <h2>Projects</h2>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+            <h2 style="margin: 0;">Projects</h2>
+            <button class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="show_new_project">+ New</button>
+          </div>
           <form phx-change="search_projects">
             <input
               type="text"
@@ -709,7 +776,6 @@ defmodule OrchidWeb.AgentLive do
           <% end %>
         </div>
         <div class="sidebar-footer">
-          <button class="btn btn-secondary" phx-click="show_new_project">+ New Project</button>
         </div>
       </div>
 
@@ -890,6 +956,19 @@ defmodule OrchidWeb.AgentLive do
                     <div style="white-space: pre-wrap;"><%= @stream_content %><span class="streaming-cursor"></span></div>
                   </div>
                 <% end %>
+                <%= if @agent_status != :idle do %>
+                  <div class="message" style="background: #1a2332; border: 1px solid #30363d; color: #58a6ff; font-size: 0.85rem; padding: 0.5rem 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                    <span class="streaming-cursor"></span>
+                    <%= case @agent_status do %>
+                      <% :thinking -> %>
+                        Calling CLI model...
+                      <% :executing_tool -> %>
+                        Executing tool...
+                      <% status -> %>
+                        <%= status %>
+                    <% end %>
+                  </div>
+                <% end %>
               </div>
               <form class="input-area" phx-submit="send_message" phx-change="update_input">
                 <textarea
@@ -916,20 +995,34 @@ defmodule OrchidWeb.AgentLive do
                 </div>
 
                 <div class="goals-section" style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin-bottom: 1rem;">
-                  <h3 style="color: #c9d1d9; margin: 0 0 1rem 0; font-size: 1rem;">Goals</h3>
+                  <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
+                    <h3 style="color: #c9d1d9; margin: 0; font-size: 1rem;">Goals</h3>
+                    <div style="display: flex; gap: 0.5rem;">
+                      <%= if @goals != [] do %>
+                        <button
+                          class="btn btn-secondary btn-sm"
+                          style="padding: 0.2rem 0.5rem; font-size: 0.75rem;"
+                          phx-click="toggle_goals_view"
+                        ><%= if @goals_view_mode == :list, do: "Graph", else: "List" %></button>
+                      <% end %>
+                      <%= if not @creating_goal do %>
+                        <button class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" phx-click="show_new_goal">+ Add Goal</button>
+                      <% end %>
+                    </div>
+                  </div>
 
                   <%= if @creating_goal do %>
                     <form phx-submit="create_goal" phx-change="update_new_goal_name" style="margin-bottom: 1rem;">
+                      <input
+                        type="text"
+                        name="name"
+                        value={@new_goal_name}
+                        placeholder="Goal name"
+                        class="sidebar-search"
+                        style="width: 100%; margin-bottom: 0.5rem;"
+                        autofocus
+                      />
                       <div style="display: flex; gap: 0.5rem;">
-                        <input
-                          type="text"
-                          name="name"
-                          value={@new_goal_name}
-                          placeholder="Goal name"
-                          class="sidebar-search"
-                          style="flex: 1;"
-                          autofocus
-                        />
                         <button type="submit" class="btn btn-sm">Add</button>
                         <button type="button" class="btn btn-secondary btn-sm" phx-click="cancel_new_goal">Cancel</button>
                       </div>
@@ -937,76 +1030,165 @@ defmodule OrchidWeb.AgentLive do
                   <% end %>
 
                   <%= if @goals == [] and not @creating_goal do %>
-                    <p style="color: #8b949e; margin: 0 0 1rem 0;">No goals yet.</p>
+                    <p style="color: #8b949e; margin: 0;">No goals yet.</p>
                   <% else %>
-                    <div class="goals-list" style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
-                      <%= for goal <- @goals do %>
-                        <div class="goal-item" style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.75rem;">
-                          <div style="display: flex; align-items: center; gap: 0.5rem;">
-                            <button
-                              phx-click="toggle_goal_status"
-                              phx-value-id={goal.id}
-                              style={"width: 1.25rem; height: 1.25rem; border-radius: 3px; border: 1px solid #30363d; background: #{if goal.metadata[:status] == :completed, do: "#238636", else: "transparent"}; cursor: pointer; display: flex; align-items: center; justify-content: center; color: white; font-size: 0.7rem;"}
+                    <%= if @goals_view_mode == :graph do %>
+                      <% graph = compute_goal_graph(@goals) %>
+                      <div style="overflow-x: auto; margin-bottom: 1rem;">
+                        <svg
+                          width={graph.width}
+                          height={graph.height}
+                          viewBox={"0 0 #{graph.width} #{graph.height}"}
+                          style="display: block;"
+                        >
+                          <defs>
+                            <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                              <polygon points="0 0, 8 3, 0 6" fill="#8b949e" />
+                            </marker>
+                          </defs>
+                          <%= for edge <- graph.edges do %>
+                            <line
+                              x1={edge.x1} y1={edge.y1}
+                              x2={edge.x2} y2={edge.y2}
+                              stroke="#8b949e" stroke-width="1.5"
+                              marker-end="url(#arrowhead)"
+                              opacity="0.6"
+                            />
+                          <% end %>
+                          <%= for node <- graph.nodes do %>
+                            <rect
+                              x={node.x} y={node.y}
+                              width={node.w} height={node.h}
+                              rx="6" ry="6"
+                              fill={goal_node_fill(node.status)}
+                              stroke={goal_node_stroke(node.status)}
+                              stroke-width="1.5"
+                            />
+                            <text
+                              x={node.x + node.w / 2}
+                              y={node.y + node.h / 2 + 1}
+                              text-anchor="middle"
+                              dominant-baseline="middle"
+                              fill={goal_node_text(node.status)}
+                              font-size="12"
+                              font-family="-apple-system, BlinkMacSystemFont, sans-serif"
                             >
-                              <%= if goal.metadata[:status] == :completed, do: "✓", else: "" %>
-                            </button>
-                            <span style={"flex: 1; color: #{if goal.metadata[:status] == :completed, do: "#8b949e", else: "#c9d1d9"}; #{if goal.metadata[:status] == :completed, do: "text-decoration: line-through;", else: ""}"}><%= goal.name %></span>
-                            <button
-                              class="btn btn-secondary btn-sm"
-                              style="padding: 0.15rem 0.4rem; font-size: 0.7rem;"
-                              phx-click="start_add_dependency"
-                              phx-value-id={goal.id}
-                            >+ dep</button>
-                            <button
-                              class="btn btn-danger btn-sm"
-                              style="padding: 0.15rem 0.4rem; font-size: 0.7rem; opacity: 0.7;"
-                              phx-click="delete_goal"
-                              phx-value-id={goal.id}
-                            >×</button>
-                          </div>
-                          <%= if (goal.metadata[:depends_on] || []) != [] do %>
-                            <div style="margin-top: 0.5rem; margin-left: 1.75rem; font-size: 0.85rem; color: #8b949e;">
-                              depends on:
-                              <%= for dep_id <- goal.metadata[:depends_on] || [] do %>
-                                <span style="display: inline-flex; align-items: center; gap: 0.25rem; background: #21262d; padding: 0.1rem 0.4rem; border-radius: 3px; margin-right: 0.25rem;">
-                                  <%= get_goal_name(@goals, dep_id) %>
-                                  <button
-                                    phx-click="remove_dependency"
-                                    phx-value-goal-id={goal.id}
-                                    phx-value-depends-on={dep_id}
-                                    style="background: none; border: none; color: #f85149; cursor: pointer; padding: 0; font-size: 0.7rem;"
-                                  >×</button>
+                              <%= truncate_name(node.name, 30) %>
+                            </text>
+                            <%= if node.agent_id do %>
+                              <text
+                                x={node.x + node.w - 6}
+                                y={node.y + 12}
+                                text-anchor="end"
+                                fill="#58a6ff"
+                                font-size="9"
+                                font-family="monospace"
+                              >
+                                <%= short_agent_id(node.agent_id) %>
+                              </text>
+                            <% end %>
+                          <% end %>
+                        </svg>
+                      </div>
+                    <% else %>
+                      <div class="goals-list" style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
+                        <%= for goal <- topo_sort_goals(@goals) do %>
+                          <div class="goal-item" style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.75rem;">
+                            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                              <button
+                                phx-click="toggle_goal_status"
+                                phx-value-id={goal.id}
+                                style={"width: 1.25rem; height: 1.25rem; border-radius: 3px; border: 1px solid #30363d; background: #{if goal.metadata[:status] == :completed, do: "#238636", else: "transparent"}; cursor: pointer; display: flex; align-items: center; justify-content: center; color: white; font-size: 0.7rem;"}
+                              >
+                                <%= if goal.metadata[:status] == :completed, do: "✓", else: "" %>
+                              </button>
+                              <span style={"flex: 1; color: #{if goal.metadata[:status] == :completed, do: "#8b949e", else: "#c9d1d9"}; #{if goal.metadata[:status] == :completed, do: "text-decoration: line-through;", else: ""}"}><%= goal.name %></span>
+                              <%= if goal.metadata[:agent_id] do %>
+                                <span style="background: #1a2332; color: #58a6ff; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem;">
+                                  <%= short_agent_id(goal.metadata[:agent_id]) %>
                                 </span>
                               <% end %>
+                              <%= if filter_agents(@agents, @current_project) != [] do %>
+                                <button
+                                  class="btn btn-secondary btn-sm"
+                                  style="padding: 0.15rem 0.4rem; font-size: 0.7rem;"
+                                  phx-click="start_assign_goal"
+                                  phx-value-id={goal.id}
+                                >Assign</button>
+                              <% end %>
+                              <button
+                                class="btn btn-secondary btn-sm"
+                                style="padding: 0.15rem 0.4rem; font-size: 0.7rem;"
+                                phx-click="start_add_dependency"
+                                phx-value-id={goal.id}
+                              >+ dep</button>
+                              <button
+                                class="btn btn-danger btn-sm"
+                                style="padding: 0.15rem 0.4rem; font-size: 0.7rem; opacity: 0.7;"
+                                phx-click="delete_goal"
+                                phx-value-id={goal.id}
+                              >×</button>
                             </div>
-                          <% end %>
-                          <%= if @adding_dependency_to == goal.id do %>
-                            <div style="margin-top: 0.5rem; margin-left: 1.75rem;">
-                              <div style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
-                                <%= for other_goal <- Enum.filter(@goals, fn g -> g.id != goal.id and g.id not in (goal.metadata[:depends_on] || []) end) do %>
+                            <%= if (goal.metadata[:depends_on] || []) != [] do %>
+                              <div style="margin-top: 0.5rem; margin-left: 1.75rem; font-size: 0.85rem; color: #8b949e;">
+                                depends on:
+                                <%= for dep_id <- goal.metadata[:depends_on] || [] do %>
+                                  <span style="display: inline-flex; align-items: center; gap: 0.25rem; background: #21262d; padding: 0.1rem 0.4rem; border-radius: 3px; margin-right: 0.25rem;">
+                                    <%= get_goal_name(@goals, dep_id) %>
+                                    <button
+                                      phx-click="remove_dependency"
+                                      phx-value-goal-id={goal.id}
+                                      phx-value-depends-on={dep_id}
+                                      style="background: none; border: none; color: #f85149; cursor: pointer; padding: 0; font-size: 0.7rem;"
+                                    >×</button>
+                                  </span>
+                                <% end %>
+                              </div>
+                            <% end %>
+                            <%= if @adding_dependency_to == goal.id do %>
+                              <div style="margin-top: 0.5rem; margin-left: 1.75rem;">
+                                <div style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                                  <%= for other_goal <- Enum.filter(@goals, fn g -> g.id != goal.id and g.id not in (goal.metadata[:depends_on] || []) end) do %>
+                                    <button
+                                      class="btn btn-secondary btn-sm"
+                                      style="padding: 0.2rem 0.5rem; font-size: 0.75rem;"
+                                      phx-click="add_dependency"
+                                      phx-value-goal-id={goal.id}
+                                      phx-value-depends-on={other_goal.id}
+                                    ><%= other_goal.name %></button>
+                                  <% end %>
                                   <button
                                     class="btn btn-secondary btn-sm"
                                     style="padding: 0.2rem 0.5rem; font-size: 0.75rem;"
-                                    phx-click="add_dependency"
-                                    phx-value-goal-id={goal.id}
-                                    phx-value-depends-on={other_goal.id}
-                                  ><%= other_goal.name %></button>
-                                <% end %>
-                                <button
-                                  class="btn btn-secondary btn-sm"
-                                  style="padding: 0.2rem 0.5rem; font-size: 0.75rem;"
-                                  phx-click="cancel_add_dependency"
-                                >Cancel</button>
+                                    phx-click="cancel_add_dependency"
+                                  >Cancel</button>
+                                </div>
                               </div>
-                            </div>
-                          <% end %>
-                        </div>
-                      <% end %>
-                    </div>
-                  <% end %>
-
-                  <%= if not @creating_goal do %>
-                    <button class="btn btn-secondary" phx-click="show_new_goal">+ Add Goal</button>
+                            <% end %>
+                            <%= if @assigning_goal == goal.id do %>
+                              <div style="margin-top: 0.5rem; margin-left: 1.75rem;">
+                                <div style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                                  <%= for agent <- filter_agents(@agents, @current_project) do %>
+                                    <button
+                                      class="btn btn-secondary btn-sm"
+                                      style="padding: 0.2rem 0.5rem; font-size: 0.75rem;"
+                                      phx-click="assign_goal_to_agent"
+                                      phx-value-goal-id={goal.id}
+                                      phx-value-agent-id={agent.id}
+                                    ><%= short_agent_id(agent.id) %></button>
+                                  <% end %>
+                                  <button
+                                    class="btn btn-secondary btn-sm"
+                                    style="padding: 0.2rem 0.5rem; font-size: 0.75rem;"
+                                    phx-click="cancel_assign_goal"
+                                  >Cancel</button>
+                                </div>
+                              </div>
+                            <% end %>
+                          </div>
+                        <% end %>
+                      </div>
+                    <% end %>
                   <% end %>
                 </div>
 
@@ -1117,6 +1299,196 @@ defmodule OrchidWeb.AgentLive do
     Enum.filter(agents, fn agent ->
       agent.project_id == current_project
     end)
+  end
+
+  defp short_agent_id(id) when is_binary(id) do
+    String.slice(id, 0, 8)
+  end
+
+  defp short_agent_id(id), do: inspect(id)
+
+  defp compute_goal_graph(goals) do
+    id_set = MapSet.new(goals, & &1.id)
+
+    # Assign each goal a layer (depth) based on longest path from roots
+    depths = compute_depths(goals, id_set)
+
+    # Group by layer
+    layers =
+      goals
+      |> Enum.group_by(&Map.get(depths, &1.id, 0))
+      |> Enum.sort_by(fn {layer, _} -> layer end)
+
+    node_w = 220
+    node_h = 36
+    h_gap = 30
+    v_gap = 60
+    pad = 20
+
+    max_layer_count = layers |> Enum.map(fn {_, gs} -> length(gs) end) |> Enum.max(fn -> 1 end)
+    svg_width = max(max_layer_count * (node_w + h_gap) - h_gap + pad * 2, 400)
+
+    # Build node positions
+    {nodes, pos_map} =
+      Enum.reduce(layers, {[], %{}}, fn {layer, layer_goals}, {nodes_acc, pos_acc} ->
+        count = length(layer_goals)
+        total_w = count * node_w + (count - 1) * h_gap
+        start_x = (svg_width - total_w) / 2
+
+        layer_goals
+        |> Enum.sort_by(& &1.name)
+        |> Enum.with_index()
+        |> Enum.reduce({nodes_acc, pos_acc}, fn {goal, idx}, {n_acc, p_acc} ->
+          x = start_x + idx * (node_w + h_gap)
+          y = pad + layer * (node_h + v_gap)
+
+          node = %{
+            id: goal.id,
+            name: goal.name,
+            status: goal.metadata[:status],
+            agent_id: goal.metadata[:agent_id],
+            x: x, y: y, w: node_w, h: node_h
+          }
+
+          {n_acc ++ [node], Map.put(p_acc, goal.id, {x, y})}
+        end)
+      end)
+
+    # Build edges: from dependency -> dependent (arrow points to the goal that depends)
+    edges =
+      Enum.flat_map(goals, fn goal ->
+        deps = (goal.metadata[:depends_on] || []) |> Enum.filter(&(&1 in id_set))
+
+        Enum.map(deps, fn dep_id ->
+          {dep_x, dep_y} = pos_map[dep_id]
+          {goal_x, goal_y} = pos_map[goal.id]
+
+          %{
+            x1: dep_x + node_w / 2,
+            y1: dep_y + node_h,
+            x2: goal_x + node_w / 2,
+            y2: goal_y
+          }
+        end)
+      end)
+
+    layer_count = length(layers)
+    svg_height = pad * 2 + layer_count * node_h + max((layer_count - 1) * v_gap, 0)
+
+    %{nodes: nodes, edges: edges, width: svg_width, height: svg_height}
+  end
+
+  defp compute_depths(goals, id_set) do
+    # BFS from roots, tracking max depth
+    initial = Map.new(goals, fn g ->
+      deps = (g.metadata[:depends_on] || []) |> Enum.filter(&(&1 in id_set))
+      {g.id, deps}
+    end)
+
+    roots = for g <- goals, (initial[g.id] || []) == [], do: g.id
+    do_compute_depths(roots, initial, %{}, 0)
+  end
+
+  defp do_compute_depths([], _deps_map, depths, _layer), do: depths
+
+  defp do_compute_depths(current, deps_map, depths, layer) do
+    depths = Enum.reduce(current, depths, fn id, acc ->
+      # Use max depth if already visited at a shallower layer
+      Map.update(acc, id, layer, &max(&1, layer))
+    end)
+
+    # Find all goals whose deps are now fully resolved
+    all_ids = Map.keys(deps_map)
+    resolved = MapSet.new(Map.keys(depths))
+
+    next =
+      all_ids
+      |> Enum.filter(fn id -> not Map.has_key?(depths, id) end)
+      |> Enum.filter(fn id ->
+        deps = deps_map[id] || []
+        deps != [] and Enum.all?(deps, &MapSet.member?(resolved, &1))
+      end)
+
+    if next == [] do
+      # Handle any remaining unresolved (cycles) — put them at layer + 1
+      remaining = Enum.filter(all_ids, fn id -> not Map.has_key?(depths, id) end)
+      Enum.reduce(remaining, depths, fn id, acc -> Map.put(acc, id, layer + 1) end)
+    else
+      do_compute_depths(next, deps_map, depths, layer + 1)
+    end
+  end
+
+  defp goal_node_fill(:completed), do: "#0e2a15"
+  defp goal_node_fill(_), do: "#0d1117"
+
+  defp goal_node_stroke(:completed), do: "#238636"
+  defp goal_node_stroke(_), do: "#30363d"
+
+  defp goal_node_text(:completed), do: "#8b949e"
+  defp goal_node_text(_), do: "#c9d1d9"
+
+  defp truncate_name(name, max) do
+    if String.length(name) > max do
+      String.slice(name, 0, max - 1) <> "..."
+    else
+      name
+    end
+  end
+
+  defp topo_sort_goals(goals) do
+    id_set = MapSet.new(goals, & &1.id)
+
+    # Kahn's algorithm
+    # Build in-degree map (only count deps that exist in our goal list)
+    in_deg =
+      Map.new(goals, fn g ->
+        deps = (g.metadata[:depends_on] || []) |> Enum.filter(&(&1 in id_set))
+        {g.id, length(deps)}
+      end)
+
+    # Build reverse adjacency: dep_id -> list of goals that depend on it
+    rev =
+      Enum.reduce(goals, %{}, fn g, acc ->
+        deps = (g.metadata[:depends_on] || []) |> Enum.filter(&(&1 in id_set))
+
+        Enum.reduce(deps, acc, fn dep_id, acc2 ->
+          Map.update(acc2, dep_id, [g.id], &[g.id | &1])
+        end)
+      end)
+
+    by_id = Map.new(goals, &{&1.id, &1})
+    queue = for g <- goals, in_deg[g.id] == 0, do: g.id
+
+    do_topo(queue, rev, in_deg, by_id, [])
+  end
+
+  defp do_topo([], _rev, in_deg, by_id, sorted) do
+    # Append any remaining (cycles) at the end
+    remaining =
+      in_deg
+      |> Enum.filter(fn {id, deg} -> deg > 0 and Map.has_key?(by_id, id) end)
+      |> Enum.map(fn {id, _} -> by_id[id] end)
+
+    Enum.reverse(sorted) ++ remaining
+  end
+
+  defp do_topo([id | rest], rev, in_deg, by_id, sorted) do
+    sorted = [by_id[id] | sorted]
+    dependents = Map.get(rev, id, [])
+
+    {queue_adds, in_deg} =
+      Enum.reduce(dependents, {[], in_deg}, fn dep_id, {adds, deg} ->
+        new_deg = deg[dep_id] - 1
+        deg = Map.put(deg, dep_id, new_deg)
+
+        if new_deg == 0 do
+          {[dep_id | adds], deg}
+        else
+          {adds, deg}
+        end
+      end)
+
+    do_topo(rest ++ queue_adds, rev, in_deg, by_id, sorted)
   end
 
   defp group_templates_by_category(templates) do

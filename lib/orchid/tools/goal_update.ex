@@ -1,0 +1,78 @@
+defmodule Orchid.Tools.GoalUpdate do
+  @moduledoc "Update an existing goal"
+  @behaviour Orchid.Tool
+
+  alias Orchid.Object
+
+  @impl true
+  def name, do: "goal_update"
+
+  @impl true
+  def description, do: "Update an existing goal's status, dependencies, or name"
+
+  @impl true
+  def parameters do
+    %{
+      type: "object",
+      properties: %{
+        id: %{
+          type: "string",
+          description: "The ID of the goal to update"
+        },
+        status: %{
+          type: "string",
+          enum: ["pending", "completed"],
+          description: "New status for the goal"
+        },
+        depends_on: %{
+          type: "array",
+          items: %{type: "string"},
+          description: "New list of goal IDs this goal depends on"
+        },
+        name: %{
+          type: "string",
+          description: "New name for the goal"
+        }
+      },
+      required: ["id"]
+    }
+  end
+
+  @impl true
+  def execute(%{"id" => id} = args, _context) do
+    case Object.get(id) do
+      {:ok, obj} when obj.type == :goal ->
+        metadata_updates =
+          %{}
+          |> maybe_put(:status, args["status"], &String.to_existing_atom/1)
+          |> maybe_put(:depends_on, args["depends_on"])
+
+        # Update metadata if there are changes
+        if metadata_updates != %{} do
+          {:ok, _} = Object.update_metadata(id, metadata_updates)
+        end
+
+        # Update name via content update if provided
+        if args["name"] do
+          {:ok, updated} = Object.get(id)
+          :ok = Orchid.Store.put_object(%{updated | name: args["name"], updated_at: DateTime.utc_now()})
+        end
+
+        {:ok, "Updated goal: #{args["name"] || obj.name} (ID: #{id})"}
+
+      {:ok, _obj} ->
+        {:error, "Object #{id} is not a goal"}
+
+      {:error, :not_found} ->
+        {:error, "Goal not found: #{id}"}
+    end
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp maybe_put(map, _key, nil, _transform), do: map
+  defp maybe_put(map, key, value, transform) when is_function(transform, 1) do
+    Map.put(map, key, transform.(value))
+  end
+end
