@@ -56,6 +56,11 @@ defmodule Orchid.Tools.AgentSpawn do
           project_id: project_id
         }
 
+        # Pass through extra template metadata flags
+        config = if template.metadata[:use_orchid_tools],
+          do: Map.put(config, :use_orchid_tools, true),
+          else: config
+
         case Orchid.Agent.create(config) do
           {:ok, agent_id} ->
             result = "Spawned agent #{agent_id} (template: #{template.name})"

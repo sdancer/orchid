@@ -231,6 +231,10 @@ defmodule Orchid.GoalWatcher do
           project_id: project.id
         }
 
+        config = if planner.metadata[:use_orchid_tools],
+          do: Map.put(config, :use_orchid_tools, true),
+          else: config
+
         case Orchid.Agent.create(config) do
           {:ok, agent_id} ->
             log("spawned planner #{agent_id} for project \"#{project.name}\"")

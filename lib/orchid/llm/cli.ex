@@ -68,20 +68,52 @@ defmodule Orchid.LLM.CLI do
   end
 
   defp build_shell_command(args, config) do
-    case config[:project_id] do
-      nil ->
-        # No project — run claude on host
-        claude_path = System.find_executable("claude") || "claude"
-        escaped_args = Enum.map(args, &shell_escape/1)
-        "#{claude_path} #{Enum.join(escaped_args, " ")}"
+    claude_path = System.find_executable("claude") || "claude"
 
-      project_id ->
-        # Run claude inside the project's sandbox container
-        container = "orchid-project-#{project_id}"
+    cond do
+      # Orchestrator with Orchid tools — run on host with MCP server
+      config[:use_orchid_tools] && config[:project_id] ->
+        mcp_config = orchid_mcp_config(config[:project_id], config[:agent_id])
+        escaped_args = Enum.map(args, &shell_escape/1)
+        "CLAUDECODE= #{claude_path} #{Enum.join(escaped_args, " ")} --mcp-config #{shell_escape(mcp_config)} --strict-mcp-config --tools ''"
+
+      # Worker agent — run inside sandbox container
+      config[:project_id] ->
+        container = "orchid-project-#{config[:project_id]}"
         escaped_args = Enum.map(args, &shell_escape/1)
         inner_cmd = "cd /workspace && claude #{Enum.join(escaped_args, " ")}"
         "podman exec #{container} sh -c #{shell_escape(inner_cmd)}"
+
+      # No project — run on host
+      true ->
+        escaped_args = Enum.map(args, &shell_escape/1)
+        "#{claude_path} #{Enum.join(escaped_args, " ")}"
     end
+  end
+
+  defp orchid_mcp_config(project_id, agent_id) do
+    cookie = File.read!(Path.expand("~/.erlang.cookie")) |> String.trim()
+    orchid_root = File.cwd!()
+    script = Path.join(orchid_root, "priv/mcp/orchid_mcp.exs")
+
+    config = %{
+      mcpServers: %{
+        orchid: %{
+          command: "elixir",
+          args: [
+            "--name", "mcp-#{:erlang.unique_integer([:positive])}@127.0.0.1",
+            "--cookie", cookie,
+            script,
+            project_id
+          ] ++ if(agent_id, do: [agent_id], else: [])
+        }
+      }
+    }
+
+    # Write to temp file
+    path = Path.join(System.tmp_dir!(), "orchid-mcp-#{:erlang.unique_integer([:positive])}.json")
+    File.write!(path, Jason.encode!(config))
+    path
   end
 
   defp shell_escape(arg) do

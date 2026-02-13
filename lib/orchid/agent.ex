@@ -580,7 +580,7 @@ defmodule Orchid.Agent do
   end
 
   defp build_llm_config(state) do
-    state.config
+    Map.put(state.config, :agent_id, state.id)
   end
 
   defp execute_tool_calls(state, tool_calls) do
