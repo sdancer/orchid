@@ -15,7 +15,7 @@ config :orchid, OrchidWeb.Endpoint,
   render_errors: [formats: [html: OrchidWeb.ErrorHTML], layout: false],
   pubsub_server: Orchid.PubSub,
   server: true,
-  force_ssl: [rewrite_on: [:x_forwarded_proto], hsts: true]
+  force_ssl: [rewrite_on: [:x_forwarded_proto], hsts: true, log: false]
 
 config :phoenix, :json_library, Jason
 

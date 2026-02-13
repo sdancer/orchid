@@ -10,7 +10,8 @@ defmodule Orchid.LLM.Gemini do
   @models %{
     gemini_pro: "gemini-2.5-pro",
     gemini_flash: "gemini-2.5-flash",
-    gemini_flash_image: "gemini-2.5-flash-image"
+    gemini_flash_image: "gemini-2.5-flash-image",
+    gemini_3_flash: "gemini-3-flash-preview"
   }
 
   @doc """
@@ -53,6 +54,9 @@ defmodule Orchid.LLM.Gemini do
 
       stream_fun = fn {:data, chunk}, {req, resp} ->
         current = Process.get(:gemini_acc, acc)
+        # Capture raw chunks for error reporting (stream body is consumed)
+        raw = Process.get(:gemini_raw, "")
+        Process.put(:gemini_raw, raw <> chunk)
         updated = process_stream_chunk(chunk, current, callback)
         Process.put(:gemini_acc, updated)
         {:cont, {req, resp}}
@@ -62,25 +66,23 @@ defmodule Orchid.LLM.Gemini do
         {:ok, %{status: 200}} ->
           final = Process.get(:gemini_acc, acc)
           Process.delete(:gemini_acc)
+          Process.delete(:gemini_raw)
           tool_calls = if final.tool_calls == [], do: nil, else: final.tool_calls
           Logger.info("Gemini: response complete, content=#{String.length(final.content)} chars, tool_calls=#{if tool_calls, do: length(tool_calls), else: 0}")
           {:ok, %{content: final.content, tool_calls: tool_calls}}
 
-        {:ok, %{status: status, body: resp_body}} ->
+        {:ok, %{status: status}} ->
+          raw_body = Process.get(:gemini_raw, "")
           Process.delete(:gemini_acc)
-          # Stream mode may leave body empty; try to get any accumulated content
-          error_detail = if resp_body == "" or resp_body == nil do
-            acc_state = Process.get(:gemini_acc, acc)
-            if acc_state.content != "", do: acc_state.content, else: "(empty response body)"
-          else
-            inspect(resp_body)
-          end
+          Process.delete(:gemini_raw)
+          error_detail = if raw_body != "", do: raw_body, else: "(empty response body)"
           Logger.error("Gemini API error #{status}: #{error_detail}")
           log_failed_request(body, status)
           {:error, {:api_error, status, error_detail}}
 
         {:error, reason} ->
           Process.delete(:gemini_acc)
+          Process.delete(:gemini_raw)
           Logger.error("Gemini request failed: #{inspect(reason)}")
           log_failed_request(body, reason)
           {:error, reason}
@@ -246,7 +248,9 @@ defmodule Orchid.LLM.Gemini do
 
               tool_parts =
                 Enum.map(msg.tool_calls, fn tc ->
-                  %{functionCall: %{name: tc.name, args: tc.arguments || %{}}}
+                  part = %{functionCall: %{name: tc.name, args: tc.arguments || %{}}}
+                  # Include thoughtSignature for Gemini 3+ models
+                  if tc[:thought_signature], do: Map.put(part, :thoughtSignature, tc.thought_signature), else: part
                 end)
 
               text_parts ++ tool_parts
@@ -313,11 +317,13 @@ defmodule Orchid.LLM.Gemini do
       |> Enum.filter(&Map.has_key?(&1, "functionCall"))
       |> Enum.map(fn part ->
         fc = part["functionCall"]
-        %{
+        tc = %{
           id: "call_#{:crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)}",
           name: fc["name"],
           arguments: fc["args"] || %{}
         }
+        # Preserve thoughtSignature for Gemini 3+ models
+        if part["thoughtSignature"], do: Map.put(tc, :thought_signature, part["thoughtSignature"]), else: tc
       end)
 
     tool_calls = if tool_calls == [], do: nil, else: tool_calls
@@ -351,6 +357,8 @@ defmodule Orchid.LLM.Gemini do
                       name: fc["name"],
                       arguments: fc["args"] || %{}
                     }
+                    # Preserve thoughtSignature for Gemini 3+ models
+                    tc = if part["thoughtSignature"], do: Map.put(tc, :thought_signature, part["thoughtSignature"]), else: tc
 
                     %{acc | tool_calls: acc.tool_calls ++ [tc]}
 

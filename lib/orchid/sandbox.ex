@@ -78,7 +78,12 @@ defmodule Orchid.Sandbox do
 
   def status(project_id) do
     case Registry.lookup(Orchid.Registry, {:sandbox, project_id}) do
-      [{pid, _}] -> GenServer.call(pid, :status)
+      [{_pid, method}] ->
+        %{
+          status: if(method, do: :ready, else: :starting),
+          container_name: container_name(project_id),
+          overlay_method: method
+        }
       [] -> nil
     end
   end
@@ -201,10 +206,6 @@ defmodule Orchid.Sandbox do
   end
 
   @impl true
-  def handle_call(:status, _from, state) do
-    {:reply, %{status: state.status, container_name: state.container_name, overlay_method: state.overlay_method}, state}
-  end
-
   def handle_call(:reset, _from, state) do
     destroy_container(state)
     new_state = start_container(%{state | status: :starting, image: get_image()})
@@ -239,13 +240,11 @@ defmodule Orchid.Sandbox do
           end
       end
 
-    creds = Path.join([home, ".claude", ".credentials.json"])
-    settings = Path.join([home, ".claude", "settings.json"])
+    claude_dir = Path.join([home, ".claude"])
 
     mounts = []
     mounts = if claude_path && File.exists?(claude_path), do: mounts ++ ["-v", "#{claude_path}:/usr/local/bin/claude:ro"], else: mounts
-    mounts = if File.exists?(creds), do: mounts ++ ["-v", "#{creds}:/root/.claude/.credentials.json:ro"], else: mounts
-    mounts = if File.exists?(settings), do: mounts ++ ["-v", "#{settings}:/root/.claude/settings.json:ro"], else: mounts
+    mounts = if File.dir?(claude_dir), do: mounts ++ ["-v", "#{claude_dir}:/tmp/.claude-host:ro"], else: mounts
     mounts
   end
 
@@ -283,7 +282,9 @@ defmodule Orchid.Sandbox do
     ] ++ claude_mounts() ++ [
       state.image,
       "sh", "-c",
-      "mkdir -p /workspace && fuse-overlayfs -o lowerdir=/workspace_lower,upperdir=/workspace_upper,workdir=/workspace_work /workspace && exec sleep infinity"
+      "sudo mkdir -p /workspace && sudo fuse-overlayfs -o lowerdir=/workspace_lower,upperdir=/workspace_upper,workdir=/workspace_work /workspace && sudo chown agent:agent /workspace && " <>
+      "if [ -d /tmp/.claude-host ]; then mkdir -p /home/agent/.claude && sudo cp /tmp/.claude-host/.credentials.json /tmp/.claude-host/settings.json /home/agent/.claude/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.claude; fi && " <>
+      "exec sleep infinity"
     ]
 
     case System.cmd("podman", args, stderr_to_stdout: true) do
@@ -311,7 +312,9 @@ defmodule Orchid.Sandbox do
       "-v", "#{state.upper_path}:/workspace:rw"
     ] ++ claude_mounts() ++ [
       state.image,
-      "sleep", "infinity"
+      "sh", "-c",
+      "if [ -d /tmp/.claude-host ]; then mkdir -p /home/agent/.claude && sudo cp /tmp/.claude-host/.credentials.json /tmp/.claude-host/settings.json /home/agent/.claude/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.claude; fi && " <>
+      "exec sleep infinity"
     ]
 
     case System.cmd("podman", args, stderr_to_stdout: true) do

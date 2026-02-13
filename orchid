@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Orchid server manager
+# Usage: ./orchid start|stop|restart|status|log
+
+set -e
+cd "$(dirname "$0")"
+
+PIDFILE="priv/data/orchid.pid"
+LOGFILE="priv/data/server.log"
+ENV_FILE=".env"
+
+if [ -f "$ENV_FILE" ]; then
+  source "$ENV_FILE"
+fi
+
+get_pid() {
+  if [ -f "$PIDFILE" ]; then
+    local pid=$(cat "$PIDFILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "$pid"
+      return 0
+    fi
+    rm -f "$PIDFILE"
+  fi
+  # Fallback: find by process name
+  pgrep -f "orchid@127.0.0.1.*mix phx.server" 2>/dev/null | head -1
+}
+
+do_start() {
+  local pid=$(get_pid)
+  if [ -n "$pid" ]; then
+    echo "Orchid already running (PID $pid)"
+    return 1
+  fi
+
+  echo "Starting Orchid..."
+  mkdir -p priv/data
+
+  elixir --name orchid@127.0.0.1 -S mix phx.server >> "$LOGFILE" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$PIDFILE"
+  echo "Orchid started (PID $pid)"
+  echo "Log: $LOGFILE"
+}
+
+do_stop() {
+  local pid=$(get_pid)
+  if [ -z "$pid" ]; then
+    echo "Orchid not running"
+    return 0
+  fi
+
+  echo "Stopping Orchid (PID $pid)..."
+  kill "$pid" 2>/dev/null || true
+
+  # Wait for graceful shutdown
+  for i in $(seq 1 10); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PIDFILE"
+      echo "Orchid stopped"
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Force killing..."
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PIDFILE"
+  echo "Orchid killed"
+}
+
+do_status() {
+  local pid=$(get_pid)
+  if [ -n "$pid" ]; then
+    echo "Orchid running (PID $pid)"
+    # Show uptime
+    ps -o etime= -p "$pid" 2>/dev/null | xargs echo "Uptime:"
+  else
+    echo "Orchid not running"
+  fi
+}
+
+do_log() {
+  tail -f "$LOGFILE"
+}
+
+case "${1:-}" in
+  start)   do_start ;;
+  stop)    do_stop ;;
+  restart) do_stop; sleep 1; do_start ;;
+  status)  do_status ;;
+  log)     do_log ;;
+  *)
+    echo "Usage: ./orchid {start|stop|restart|status|log}"
+    exit 1
+    ;;
+esac

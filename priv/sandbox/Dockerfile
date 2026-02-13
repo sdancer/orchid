@@ -7,7 +7,11 @@ RUN apt-get update -qq && \
       ripgrep \
       curl \
       ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+      sudo \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -s /bin/bash agent \
+    && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent
 
+USER agent
 WORKDIR /workspace
 CMD ["sleep", "infinity"]

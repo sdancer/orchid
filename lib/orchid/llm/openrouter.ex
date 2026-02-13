@@ -8,7 +8,8 @@ defmodule Orchid.LLM.OpenRouter do
   @base_url "https://openrouter.ai/api/v1/chat/completions"
 
   @models %{
-    minimax_m2_5: "minimax/minimax-m2.5"
+    minimax_m2_5: "minimax/minimax-m2.5",
+    glm_5: "z-ai/glm-5"
   }
 
   @default_model :minimax_m2_5
@@ -56,7 +57,18 @@ defmodule Orchid.LLM.OpenRouter do
         {:ok, %{status: 200}} ->
           final = Process.get(:openrouter_acc, acc)
           Process.delete(:openrouter_acc)
-          tool_calls = if final.tool_calls == [], do: nil, else: final.tool_calls
+          tool_calls =
+            case final.tool_calls do
+              [] -> nil
+              tcs ->
+                Enum.map(tcs, fn tc ->
+                  args = case Jason.decode(tc[:_args_json] || "{}") do
+                    {:ok, parsed} -> parsed
+                    _ -> %{}
+                  end
+                  %{id: tc.id, name: tc.name, arguments: args}
+                end)
+            end
           Logger.info("OpenRouter: response complete, content=#{String.length(final.content)} chars, tool_calls=#{if tool_calls, do: length(tool_calls), else: 0}")
           {:ok, %{content: final.content, tool_calls: tool_calls}}
 

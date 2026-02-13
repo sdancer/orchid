@@ -120,26 +120,9 @@ defmodule Orchid.LLM.CLI do
         args
       end
 
-    # Session handling:
-    # - First message: use --session-id to create session with specific ID
-    # - Subsequent messages: use --resume <session-id> to continue
-    args =
-      cond do
-        config[:resume] && config[:session_id] ->
-          # Resume existing session by ID
-          args ++ ["--resume", config[:session_id]]
-
-        config[:session_id] ->
-          # First message - create session with specific ID
-          args ++ ["--session-id", config[:session_id]]
-
-        true ->
-          args
-      end
-
-    # Max turns — default to 5 to allow a few tool calls + final response
-    # (Orchid's agent loop handles higher-level iteration)
-    max_turns = config[:max_turns] || 5
+    # Max turns — allow enough tool calls for real work (read, edit, test, etc.)
+    # Orchid's agent loop handles higher-level re-kicking if needed
+    max_turns = config[:max_turns] || 25
     args = args ++ ["--max-turns", to_string(max_turns)]
 
     # Allowed tools
@@ -151,12 +134,17 @@ defmodule Orchid.LLM.CLI do
         args
       end
 
-    # Permission mode
+    # Permission mode — sandbox containers skip permissions by default
     args =
-      if config[:permission_mode] do
-        args ++ ["--permission-mode", config[:permission_mode]]
-      else
-        args
+      cond do
+        config[:permission_mode] ->
+          args ++ ["--permission-mode", config[:permission_mode]]
+
+        config[:project_id] ->
+          args ++ ["--dangerously-skip-permissions"]
+
+        true ->
+          args
       end
 
     # Prompt is a positional argument at the end

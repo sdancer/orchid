@@ -68,6 +68,11 @@ defmodule Orchid.Tools.GoalUpdate do
           :ok = Orchid.Store.put_object(%{updated | name: args["name"], updated_at: DateTime.utc_now()})
         end
 
+        # Notify orchestrator when a goal is completed
+        if args["status"] == "completed" do
+          Orchid.Goals.notify_orchestrator(id)
+        end
+
         {:ok, "Updated goal: #{args["name"] || obj.name} (ID: #{id})"}
 
       {:ok, _obj} ->

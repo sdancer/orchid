@@ -111,10 +111,21 @@ defmodule Orchid.Agent do
 
   @doc """
   Get the current state of an agent.
-  Optional timeout (ms or :infinity, default :infinity).
+  Reads from ETS — lock-free, never blocks.
+  Optional timeout kept for API compat but ignored.
   """
-  def get_state(agent_id, timeout \\ :infinity) do
-    call(agent_id, :get_state, timeout)
+  def get_state(agent_id, _timeout \\ :infinity) do
+    case :ets.lookup(:orchid_agent_states, agent_id) do
+      [{^agent_id, state}] -> {:ok, state}
+      [] -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Publish agent state to ETS. Can be called from any process (including Tasks).
+  """
+  def publish_state(state) do
+    :ets.insert(:orchid_agent_states, {state.id, state})
   end
 
   @doc """
@@ -194,15 +205,12 @@ defmodule Orchid.Agent do
       end
 
     Logger.info("Agent #{id} started, project=#{inspect(state.project_id)}, provider=#{config[:provider]}, model=#{config[:model]}")
+    publish_state(state)
     Store.put_agent_state(id, state)
     {:ok, state}
   end
 
   @impl true
-  def handle_call(:get_state, _from, state) do
-    {:reply, {:ok, state}, state}
-  end
-
   def handle_call({:attach, object_ids}, _from, state) do
     # Verify all objects exist
     valid_ids =
@@ -215,6 +223,7 @@ defmodule Orchid.Agent do
 
     new_objects = Enum.uniq(state.objects ++ valid_ids)
     state = %{state | objects: new_objects}
+    publish_state(state)
     Store.put_agent_state(state.id, state)
     {:reply, :ok, state}
   end
@@ -224,6 +233,7 @@ defmodule Orchid.Agent do
       case Orchid.Sandbox.reset(state.project_id) do
         {:ok, status} ->
           new_state = %{state | sandbox: status}
+          publish_state(new_state)
           Store.put_agent_state(state.id, new_state)
           {:reply, {:ok, status}, new_state}
 
@@ -237,6 +247,7 @@ defmodule Orchid.Agent do
 
   def handle_call({:remember, key, value}, _from, state) do
     state = %{state | memory: Map.put(state.memory, key, value)}
+    publish_state(state)
     Store.put_agent_state(state.id, state)
     {:reply, :ok, state}
   end
@@ -249,7 +260,7 @@ defmodule Orchid.Agent do
   def handle_cast({:retry, notify}, state) do
     # Re-run the LLM without adding a new message (last message already in history)
     state = %{state | status: :thinking}
-    Store.put_agent_state(state.id, state)
+    publish_state(state)
 
     agent_pid = self()
     agent_id = state.id
@@ -281,7 +292,7 @@ defmodule Orchid.Agent do
   def handle_cast({:run, message, notify}, state) do
     state = %{state | status: :thinking}
     state = add_message(state, :user, message)
-    Store.put_agent_state(state.id, state)
+    publish_state(state)
 
     agent_pid = self()
     agent_id = state.id
@@ -313,20 +324,57 @@ defmodule Orchid.Agent do
   @impl true
   def handle_info({:update_status, status}, state) do
     state = %{state | status: status}
-    Store.put_agent_state(state.id, state)
+    publish_state(state)
     {:noreply, state}
   end
 
-  def handle_info({:work_done, new_state, _result}, _state) do
+  def handle_info({:work_done, new_state, result}, _state) do
     new_state = %{new_state | status: :idle}
+    publish_state(new_state)
     Store.put_agent_state(new_state.id, new_state)
+
+    # Auto-complete assigned goals for CLI agents (they can't call goal_update themselves)
+    if new_state.config[:provider] == :cli && new_state.project_id do
+      auto_complete_goals(new_state, result)
+    end
+
     {:noreply, new_state}
   end
 
   @impl true
   def terminate(_reason, state) do
+    :ets.delete(:orchid_agent_states, state.id)
     Store.delete_agent_state(state.id)
     :ok
+  end
+
+  # Auto-complete goals for CLI agents that can't call goal_update themselves
+  defp auto_complete_goals(state, result) do
+    goals = Orchid.Object.list_goals_for_project(state.project_id)
+
+    assigned_pending =
+      Enum.filter(goals, fn g ->
+        g.metadata[:agent_id] == state.id and g.metadata[:status] != :completed
+      end)
+
+    report = result || last_assistant_message(state)
+
+    for goal <- assigned_pending do
+      Logger.info("Agent #{state.id}: auto-completing goal \"#{goal.name}\" [#{goal.id}]")
+      Orchid.Goals.set_status(goal.id, :completed)
+      # Store the report on the goal metadata so orchestrator can read it
+      Orchid.Object.update_metadata(goal.id, %{report: report})
+    end
+  end
+
+  defp last_assistant_message(state) do
+    state.messages
+    |> Enum.reverse()
+    |> Enum.find(fn msg -> msg.role == :assistant end)
+    |> case do
+      nil -> "(no response)"
+      msg -> msg.content || "(empty)"
+    end
   end
 
   # Private functions
@@ -392,11 +440,14 @@ defmodule Orchid.Agent do
     case llm_call_with_retry(config, context, callback, agent_pid) do
       {:ok, %{content: content, tool_calls: nil}} ->
         state = add_assistant_message(state, content)
+        publish_state(state)
         {:ok, content, state}
 
       {:ok, %{content: content, tool_calls: tool_calls}} when is_list(tool_calls) ->
         state = add_assistant_message(state, content, tool_calls)
-        state = %{state | status: :executing_tool}
+        tool_names = Enum.map_join(tool_calls, ", ", & &1.name)
+        state = %{state | status: {:executing_tool, tool_names}}
+        publish_state(state)
 
         {state, tool_results} = execute_tool_calls(state, tool_calls)
 
@@ -405,6 +456,7 @@ defmodule Orchid.Agent do
             add_message(acc, :tool, result)
           end)
 
+        publish_state(state)
         do_run_loop_streaming(state, callback, iterations_left - 1, content, agent_pid)
 
       {:error, reason} ->
@@ -461,33 +513,7 @@ defmodule Orchid.Agent do
   end
 
   defp build_llm_config(state) do
-    config = state.config
-
-    # For CLI provider, use a UUID session_id and resume if messages exist
-    if config[:provider] == :cli do
-      # Check if we have previous assistant messages (indicating ongoing conversation)
-      has_history = Enum.any?(state.messages, fn msg -> msg.role == :assistant end)
-
-      # Generate a deterministic UUID from agent ID for session
-      session_uuid = agent_id_to_uuid(state.id)
-
-      config
-      |> Map.put(:session_id, session_uuid)
-      |> Map.put(:resume, has_history)
-    else
-      config
-    end
-  end
-
-  defp agent_id_to_uuid(agent_id) do
-    # Create a deterministic UUID v5-like ID from agent_id
-    # Using SHA256 and formatting as UUID
-    <<a::32, b::16, c::16, d::16, e::48, _rest::binary>> =
-      :crypto.hash(:sha256, agent_id)
-
-    # Format as UUID string
-    :io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", [a, b, c, d, e])
-    |> IO.iodata_to_binary()
+    state.config
   end
 
   defp execute_tool_calls(state, tool_calls) do
@@ -519,9 +545,17 @@ defmodule Orchid.Agent do
     {state, formatted_result}
   end
 
-  defp format_tool_result({:ok, value}) when is_binary(value), do: value
+  defp format_tool_result({:ok, value}) when is_binary(value), do: sanitize_utf8(value)
   defp format_tool_result({:ok, value}), do: inspect(value)
   defp format_tool_result({:error, reason}), do: "Error: #{inspect(reason)}"
+
+  defp sanitize_utf8(str) do
+    if String.valid?(str) do
+      str
+    else
+      "(binary data, #{byte_size(str)} bytes — not valid UTF-8)"
+    end
+  end
 
   defp default_system_prompt do
     """

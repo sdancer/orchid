@@ -76,7 +76,9 @@ defmodule Orchid.Goals do
 
   @doc "Set a goal's status explicitly."
   def set_status(goal_id, status) when is_atom(status) do
-    Object.update_metadata(goal_id, %{status: status})
+    result = Object.update_metadata(goal_id, %{status: status})
+    if status == :completed, do: notify_orchestrator(goal_id)
+    result
   end
 
   @doc "Add a dependency to a goal."
@@ -105,6 +107,29 @@ defmodule Orchid.Goals do
 
       error ->
         error
+    end
+  end
+
+  @doc """
+  When a goal is completed, notify the orchestrator (parent goal's agent).
+  This creates a reactive feedback loop: worker finishes → orchestrator wakes up → spawns next batch.
+  """
+  def notify_orchestrator(goal_id) do
+    with {:ok, goal} <- Object.get(goal_id),
+         parent_id when not is_nil(parent_id) <- goal.metadata[:parent_goal_id],
+         {:ok, parent} <- Object.get(parent_id),
+         orchestrator_id when not is_nil(orchestrator_id) <- parent.metadata[:agent_id],
+         {:ok, agent_state} <- Orchid.Agent.get_state(orchestrator_id),
+         true <- agent_state.status == :idle do
+      report = goal.metadata[:report]
+      report_section = if report, do: "\n\nAgent report:\n#{String.slice(report, 0, 2000)}", else: ""
+      message = "Goal completed: \"#{goal.name}\" [#{goal_id}].#{report_section}\n\nCheck `goal_list` for updated state and continue with the next steps."
+
+      Task.start(fn ->
+        Orchid.Agent.stream(orchestrator_id, message, fn _chunk -> :ok end)
+      end)
+    else
+      _ -> :ok
     end
   end
 

@@ -692,7 +692,10 @@ defmodule OrchidWeb.AgentLive do
           end
       end
 
-    socket = refresh_sandbox_statuses(socket)
+    socket =
+      socket
+      |> assign(:agents, list_agents_with_info())
+      |> refresh_sandbox_statuses()
 
     Process.send_after(self(), :poll_agent_status, 2000)
     {:noreply, socket}
@@ -874,6 +877,7 @@ defmodule OrchidWeb.AgentLive do
                       <option value="gemini_pro" selected={@template_model == :gemini_pro}>Gemini Pro</option>
                       <option value="gemini_flash" selected={@template_model == :gemini_flash}>Gemini Flash</option>
                       <option value="gemini_flash_image" selected={@template_model == :gemini_flash_image}>Gemini Flash Image</option>
+                      <option value="gemini_3_flash" selected={@template_model == :gemini_3_flash}>Gemini 3 Flash</option>
                       <option value="llama_3_1_8b" selected={@template_model == :llama_3_1_8b}>Llama 3.1 8B</option>
                       <option value="llama_3_3_70b" selected={@template_model == :llama_3_3_70b}>Llama 3.3 70B</option>
                       <option value="gpt_oss_120b" selected={@template_model == :gpt_oss_120b}>GPT OSS 120B</option>
@@ -881,6 +885,7 @@ defmodule OrchidWeb.AgentLive do
                       <option value="qwen_3_235b" selected={@template_model == :qwen_3_235b}>Qwen 3 235B</option>
                       <option value="zai_glm_4_7" selected={@template_model == :zai_glm_4_7}>Z.ai GLM 4.7</option>
                       <option value="minimax_m2_5" selected={@template_model == :minimax_m2_5}>MiniMax M2.5</option>
+                      <option value="glm_5" selected={@template_model == :glm_5}>GLM-5</option>
                     </select>
                   </div>
                 </div>
@@ -977,6 +982,8 @@ defmodule OrchidWeb.AgentLive do
                     <%= case @agent_status do %>
                       <% :thinking -> %>
                         Thinking...
+                      <% {:executing_tool, tool_names} -> %>
+                        Executing <%= tool_names %>...
                       <% :executing_tool -> %>
                         Executing tool...
                       <% {:retrying, attempt, max, status_code} -> %>
@@ -1405,24 +1412,14 @@ defmodule OrchidWeb.AgentLive do
 
   defp list_agents_with_info do
     Orchid.Agent.list()
-    |> Task.async_stream(
-      fn agent_id ->
-        case Orchid.Agent.get_state(agent_id, 1000) do
-          {:ok, state} ->
-            %{id: agent_id, project_id: state.project_id}
-
-          _ ->
-            %{id: agent_id, project_id: nil}
-        end
-      end,
-      timeout: 2000,
-      on_timeout: :kill_task
-    )
-    |> Enum.map(fn
-      {:ok, info} -> info
-      _ -> nil
+    |> Enum.map(fn agent_id ->
+      case Orchid.Agent.get_state(agent_id) do
+        {:ok, state} ->
+          %{id: agent_id, project_id: state.project_id}
+        _ ->
+          %{id: agent_id, project_id: nil}
+      end
     end)
-    |> Enum.reject(&is_nil/1)
   end
 
   defp refresh_sandbox_statuses(socket) do
