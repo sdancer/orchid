@@ -42,4 +42,6 @@ defmodule Orchid.Tools.PromptUpdate do
         {:error, "Prompt not found: #{id}"}
     end
   end
+
+  def execute(_args, _context), do: {:error, "Missing required parameters: id, content"}
 end

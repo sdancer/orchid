@@ -19,6 +19,7 @@ defmodule Orchid.Agent do
       objects: [],
       tool_history: [],
       memory: %{},
+      notifications: [],
       status: :idle
     ]
   end
@@ -154,6 +155,21 @@ defmodule Orchid.Agent do
   end
 
   @doc """
+  Push a notification to an agent. Non-blocking.
+  The agent can drain these later (e.g. via the wait tool).
+  """
+  def notify(agent_id, message) do
+    cast(agent_id, {:notify, message})
+  end
+
+  @doc """
+  Drain all pending notifications from an agent. Returns the list and clears it.
+  """
+  def drain_notifications(agent_id) do
+    call(agent_id, :drain_notifications)
+  end
+
+  @doc """
   Add a message to agent memory.
   """
   def remember(agent_id, key, value) do
@@ -256,7 +272,16 @@ defmodule Orchid.Agent do
     {:reply, Map.get(state.memory, key), state}
   end
 
+  def handle_call(:drain_notifications, _from, state) do
+    {:reply, {:ok, state.notifications}, %{state | notifications: []}}
+  end
+
   @impl true
+  def handle_cast({:notify, message}, state) do
+    state = %{state | notifications: state.notifications ++ [message]}
+    {:noreply, state}
+  end
+
   def handle_cast({:retry, notify}, state) do
     # Re-run the LLM without adding a new message (last message already in history)
     state = %{state | status: :thinking}
@@ -328,8 +353,9 @@ defmodule Orchid.Agent do
     {:noreply, state}
   end
 
-  def handle_info({:work_done, new_state, result}, _state) do
-    new_state = %{new_state | status: :idle}
+  def handle_info({:work_done, new_state, result}, state) do
+    # Preserve notifications that arrived during the Task's execution
+    new_state = %{new_state | status: :idle, notifications: state.notifications}
     publish_state(new_state)
     Store.put_agent_state(new_state.id, new_state)
 
@@ -451,10 +477,28 @@ defmodule Orchid.Agent do
 
         {state, tool_results} = execute_tool_calls(state, tool_calls)
 
+        # Separate out notifications collected by wait tool
+        {notifications, tool_results} =
+          Enum.reduce(tool_results, {[], []}, fn result, {notifs, results} ->
+            case result do
+              {:notifications, msgs, formatted} -> {notifs ++ msgs, results ++ [formatted]}
+              _ -> {notifs, results ++ [result]}
+            end
+          end)
+
         state =
           Enum.reduce(tool_results, state, fn result, acc ->
             add_message(acc, :tool, result)
           end)
+
+        # Inject notifications as a user message so the LLM sees them naturally
+        state =
+          if notifications != [] do
+            notif_text = Enum.join(notifications, "\n\n---\n\n")
+            add_message(state, :user, notif_text)
+          else
+            state
+          end
 
         publish_state(state)
         do_run_loop_streaming(state, callback, iterations_left - 1, content, agent_pid)
@@ -524,25 +568,44 @@ defmodule Orchid.Agent do
   end
 
   defp execute_tool(state, %{name: name, arguments: args, id: tool_id}) do
-    result = Orchid.Tool.execute(name, args, %{agent_state: state})
+    args_preview = args |> inspect() |> String.slice(0, 200)
+    Logger.info("Agent #{state.id}: tool #{name}(#{args_preview})")
 
-    tool_record = %{
-      id: tool_id,
-      tool: name,
-      args: args,
-      result: result,
-      timestamp: DateTime.utc_now()
-    }
+    result =
+      try do
+        Orchid.Tool.execute(name, args || %{}, %{agent_state: state})
+      rescue
+        e ->
+          Logger.error("Tool #{name} crashed: #{Exception.message(e)}")
+          {:error, "Tool error: #{Exception.message(e)}"}
+      end
 
-    state = %{state | tool_history: state.tool_history ++ [tool_record]}
+    # Handle wait tool's special notification return
+    case result do
+      {:notifications, messages, _tool_result} ->
+        tool_record = %{id: tool_id, tool: name, args: args, result: {:ok, "notifications"}, timestamp: DateTime.utc_now()}
+        state = %{state | tool_history: state.tool_history ++ [tool_record]}
 
-    formatted_result = %{
-      tool_use_id: tool_id,
-      tool_name: name,
-      content: format_tool_result(result)
-    }
+        formatted = %{
+          tool_use_id: tool_id,
+          tool_name: name,
+          content: "Received #{length(messages)} notification(s)."
+        }
 
-    {state, formatted_result}
+        {state, {:notifications, messages, formatted}}
+
+      _ ->
+        tool_record = %{id: tool_id, tool: name, args: args, result: result, timestamp: DateTime.utc_now()}
+        state = %{state | tool_history: state.tool_history ++ [tool_record]}
+
+        formatted = %{
+          tool_use_id: tool_id,
+          tool_name: name,
+          content: format_tool_result(result)
+        }
+
+        {state, formatted}
+    end
   end
 
   defp format_tool_result({:ok, value}) when is_binary(value), do: sanitize_utf8(value)

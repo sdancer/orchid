@@ -42,8 +42,22 @@ defmodule Orchid.Tools.GoalCreate do
   def execute(%{"name" => name} = args, %{agent_state: %{id: agent_id, project_id: project_id}})
       when not is_nil(project_id) do
     description = args["description"] || ""
-    parent_goal_id = GoalHelpers.resolve_goal_ref(args["parent_goal_id"], project_id)
     depends_on = GoalHelpers.resolve_goal_refs(args["depends_on"], project_id)
+
+    # Auto-set parent to the agent's own assigned goal if not provided
+    parent_goal_id =
+      case GoalHelpers.resolve_goal_ref(args["parent_goal_id"], project_id) do
+        nil ->
+          Orchid.Object.list_goals_for_project(project_id)
+          |> Enum.find(fn g -> g.metadata[:agent_id] == agent_id end)
+          |> case do
+            nil -> nil
+            g -> g.id
+          end
+
+        id ->
+          id
+      end
 
     metadata = %{
       project_id: project_id,

@@ -122,7 +122,7 @@ defmodule Orchid.LLM.CLI do
 
     # Max turns — allow enough tool calls for real work (read, edit, test, etc.)
     # Orchid's agent loop handles higher-level re-kicking if needed
-    max_turns = config[:max_turns] || 25
+    max_turns = config[:max_turns] || 100
     args = args ++ ["--max-turns", to_string(max_turns)]
 
     # Allowed tools

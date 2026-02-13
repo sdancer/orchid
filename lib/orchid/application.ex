@@ -4,6 +4,9 @@ defmodule Orchid.Application do
 
   @impl true
   def start(_type, _args) do
+    # ETS table for lock-free agent state reads (public so Tasks can write)
+    :ets.new(:orchid_agent_states, [:named_table, :public, :set, read_concurrency: true])
+
     children = [
       # ETS-backed storage for objects and agent state
       Orchid.Store,

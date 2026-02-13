@@ -43,4 +43,6 @@ defmodule Orchid.Tools.ObjectRead do
         {:error, "Object not found: #{id}"}
     end
   end
+
+  def execute(_args, _context), do: {:error, "Missing required parameter: id"}
 end

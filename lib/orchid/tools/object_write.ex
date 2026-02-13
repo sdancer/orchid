@@ -38,4 +38,6 @@ defmodule Orchid.Tools.ObjectWrite do
         {:error, "Object not found: #{id}"}
     end
   end
+
+  def execute(_args, _context), do: {:error, "Missing required parameters: id, content"}
 end

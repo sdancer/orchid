@@ -60,4 +60,8 @@ defmodule Orchid.Tools.GoalRead do
         {:error, "Goal not found: #{id}"}
     end
   end
+
+  def execute(_args, _context) do
+    {:error, "Missing required parameter: id"}
+  end
 end

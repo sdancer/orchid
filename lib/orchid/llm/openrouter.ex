@@ -275,7 +275,8 @@ defmodule Orchid.LLM.OpenRouter do
                       tc_pos = length(tc_list) - 1
                       if tc_pos >= 0 do
                         tc = Enum.at(tc_list, tc_pos)
-                        updated_tc = %{tc | _args_json: tc._args_json <> args_chunk}
+                        existing = tc[:_args_json] || ""
+                        updated_tc = Map.put(tc, :_args_json, existing <> args_chunk)
                         updated_list = List.replace_at(tc_list, tc_pos, updated_tc)
                         %{acc | tool_calls: updated_list}
                       else
@@ -293,24 +294,5 @@ defmodule Orchid.LLM.OpenRouter do
           acc
       end
     end)
-    |> finalize_tool_calls()
-  end
-
-  # Parse accumulated JSON argument strings into maps
-  defp finalize_tool_calls(%{tool_calls: tool_calls} = acc) do
-    finalized =
-      Enum.map(tool_calls, fn tc ->
-        if Map.has_key?(tc, :_args_json) do
-          args = case Jason.decode(tc._args_json) do
-            {:ok, parsed} -> parsed
-            _ -> %{}
-          end
-          %{id: tc.id, name: tc.name, arguments: args}
-        else
-          tc
-        end
-      end)
-
-    %{acc | tool_calls: finalized}
   end
 end

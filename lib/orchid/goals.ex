@@ -118,16 +118,12 @@ defmodule Orchid.Goals do
     with {:ok, goal} <- Object.get(goal_id),
          parent_id when not is_nil(parent_id) <- goal.metadata[:parent_goal_id],
          {:ok, parent} <- Object.get(parent_id),
-         orchestrator_id when not is_nil(orchestrator_id) <- parent.metadata[:agent_id],
-         {:ok, agent_state} <- Orchid.Agent.get_state(orchestrator_id),
-         true <- agent_state.status == :idle do
+         orchestrator_id when not is_nil(orchestrator_id) <- parent.metadata[:agent_id] do
       report = goal.metadata[:report]
       report_section = if report, do: "\n\nAgent report:\n#{String.slice(report, 0, 2000)}", else: ""
       message = "Goal completed: \"#{goal.name}\" [#{goal_id}].#{report_section}\n\nCheck `goal_list` for updated state and continue with the next steps."
 
-      Task.start(fn ->
-        Orchid.Agent.stream(orchestrator_id, message, fn _chunk -> :ok end)
-      end)
+      Orchid.Agent.notify(orchestrator_id, message)
     else
       _ -> :ok
     end
@@ -139,7 +135,14 @@ defmodule Orchid.Goals do
       {:ok, goal} ->
         {:ok, _} = Object.update_metadata(goal_id, %{agent_id: agent_id})
 
-        message = "Work on goal: #{goal.name}\nGoal ID: #{goal_id}"
+        description =
+          if goal.content && goal.content != "" do
+            "\n\n#{goal.content}"
+          else
+            ""
+          end
+
+        message = "Work on goal: #{goal.name}\nGoal ID: #{goal_id}#{description}"
 
         Task.start(fn ->
           Orchid.Agent.stream(agent_id, message, fn _chunk -> :ok end)

@@ -696,6 +696,7 @@ defmodule OrchidWeb.AgentLive do
       socket
       |> assign(:agents, list_agents_with_info())
       |> refresh_sandbox_statuses()
+      |> refresh_goals()
 
     Process.send_after(self(), :poll_agent_status, 2000)
     {:noreply, socket}
@@ -1328,14 +1329,22 @@ defmodule OrchidWeb.AgentLive do
             <div class="agent-list">
               <%= for agent <- filter_agents(@agents, @current_project) do %>
                 <div class="agent-card">
-                  <h3><%= agent.id %></h3>
-                  <div class="status">Active</div>
-                  <%= if agent.project_id do %>
-                    <div class="agent-project">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+                    <h3 style="margin: 0;"><%= agent.id %></h3>
+                    <div style={"padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; #{agent_status_style(agent.status)}"}><%= agent_status_label(agent.status) %></div>
+                  </div>
+                  <%= if agent.template do %>
+                    <div style="color: #8b949e; font-size: 0.85rem;"><%= agent.template %></div>
+                  <% end %>
+                  <%= if agent.goal do %>
+                    <div style="color: #c9d1d9; font-size: 0.85rem; margin-top: 0.25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title={agent.goal}><%= agent.goal %></div>
+                  <% end %>
+                  <%= if agent.project_id && !@current_project do %>
+                    <div class="agent-project" style="margin-top: 0.25rem;">
                       <span class="project-badge"><%= get_project_name(@projects, agent.project_id) %></span>
                     </div>
                   <% end %>
-                  <div class="actions">
+                  <div class="actions" style="margin-top: 0.5rem;">
                     <button class="btn btn-secondary" phx-click="select_agent" phx-value-id={agent.id}>Open</button>
                     <button class="btn btn-danger" phx-click="stop_agent" phx-value-id={agent.id}>Stop</button>
                   </div>
@@ -1415,9 +1424,33 @@ defmodule OrchidWeb.AgentLive do
     |> Enum.map(fn agent_id ->
       case Orchid.Agent.get_state(agent_id) do
         {:ok, state} ->
-          %{id: agent_id, project_id: state.project_id}
+          template_name =
+            case state.config[:template_id] do
+              nil -> nil
+              tid ->
+                case Orchid.Object.get(tid) do
+                  {:ok, obj} -> obj.name
+                  _ -> nil
+                end
+            end
+
+          goal_name =
+            case state.project_id do
+              nil -> nil
+              pid ->
+                Orchid.Object.list_goals_for_project(pid)
+                |> Enum.find(fn g -> g.metadata[:agent_id] == agent_id end)
+                |> case do
+                  nil -> nil
+                  g -> g.name
+                end
+            end
+
+          status = state.status
+
+          %{id: agent_id, project_id: state.project_id, template: template_name, goal: goal_name, status: status}
         _ ->
-          %{id: agent_id, project_id: nil}
+          %{id: agent_id, project_id: nil, template: nil, goal: nil, status: :unknown}
       end
     end)
   end
@@ -1437,6 +1470,19 @@ defmodule OrchidWeb.AgentLive do
         assign(socket, :sandbox_statuses, statuses)
     end
   end
+
+  defp agent_status_label(:idle), do: "Idle"
+  defp agent_status_label({:executing_tool, names}), do: "Tool: #{names}"
+  defp agent_status_label(:thinking), do: "Thinking..."
+  defp agent_status_label(:streaming), do: "Streaming..."
+  defp agent_status_label(status) when is_atom(status), do: status |> Atom.to_string() |> String.capitalize()
+  defp agent_status_label(_), do: "Active"
+
+  defp agent_status_style(:idle), do: "background: #21262d; color: #8b949e;"
+  defp agent_status_style({:executing_tool, _}), do: "background: #2d2000; color: #d29922;"
+  defp agent_status_style(:thinking), do: "background: #0c2d6b; color: #58a6ff;"
+  defp agent_status_style(:streaming), do: "background: #0c2d6b; color: #58a6ff;"
+  defp agent_status_style(_), do: "background: #0e2a15; color: #7ee787;"
 
   defp sandbox_status_style(:ready), do: "background: #0e2a15; color: #7ee787;"
   defp sandbox_status_style(:starting), do: "background: #2d2000; color: #d29922;"

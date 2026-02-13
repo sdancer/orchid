@@ -84,14 +84,28 @@ do_log() {
   tail -f "$LOGFILE"
 }
 
+do_reset() {
+  local cookie
+  cookie=$(cat "$HOME/.erlang.cookie" 2>/dev/null || echo "orchid")
+  elixir --name "reset-$$@127.0.0.1" --cookie "$cookie" priv/scripts/reset_project.exs
+}
+
+do_inspect() {
+  local cookie
+  cookie=$(cat "$HOME/.erlang.cookie" 2>/dev/null || echo "orchid")
+  elixir --name "inspect-$$@127.0.0.1" --cookie "$cookie" priv/scripts/inspect_agent.exs "$@"
+}
+
 case "${1:-}" in
   start)   do_start ;;
   stop)    do_stop ;;
-  restart) do_stop; sleep 1; do_start ;;
+  restart) do_stop; sleep 1; : > "$LOGFILE"; do_start ;;
+  reset)   do_reset ;;
   status)  do_status ;;
   log)     do_log ;;
+  inspect) shift; do_inspect "$@" ;;
   *)
-    echo "Usage: ./orchid {start|stop|restart|status|log}"
+    echo "Usage: ./orchid {start|stop|restart|reset|inspect [agent_id]|status|log}"
     exit 1
     ;;
 esac

@@ -290,6 +290,7 @@ defmodule Orchid.Seeds do
     - **Choose the right template.** Use "Coder" or "Elixir Expert" for code tasks, "Shell Operator" for infrastructure, "Explorer" for research/analysis.
     - **Don't duplicate work.** Check `goal_list` before creating goals. Skip goals already completed or assigned.
     - **Act immediately.** Don't narrate your plan — execute it with tool calls.
+    - **After spawning agents, call `wait` to block until they report back.** Don't end your turn without waiting.
 
     ## Available Tools
     - `goal_list` — List all goals
@@ -297,6 +298,7 @@ defmodule Orchid.Seeds do
     - `goal_create` — Create a goal (name, description, depends_on, parent_goal_id)
     - `goal_update` — Update goal status or dependencies
     - `agent_spawn` — Spawn an agent (template, goal_id, message)
+    - `wait` — Wait up to N seconds for agent completion notifications. Always call this after spawning agents.
     - `list` — List workspace files
     - `read` — Read a file for context
     - `grep` — Search files for patterns

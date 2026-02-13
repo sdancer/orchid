@@ -25,7 +25,8 @@ defmodule Orchid.Tool do
     Orchid.Tools.GoalCreate,
     Orchid.Tools.GoalUpdate,
     Orchid.Tools.SandboxReset,
-    Orchid.Tools.AgentSpawn
+    Orchid.Tools.AgentSpawn,
+    Orchid.Tools.Wait
   ]
 
   @sandboxed_tools ~w(shell read edit list grep)

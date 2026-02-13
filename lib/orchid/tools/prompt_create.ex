@@ -33,4 +33,6 @@ defmodule Orchid.Tools.PromptCreate do
     {:ok, obj} = Object.create(:prompt, name, content)
     {:ok, "Created prompt: #{obj.name} (ID: #{obj.id})"}
   end
+
+  def execute(_args, _context), do: {:error, "Missing required parameters: name, content"}
 end
