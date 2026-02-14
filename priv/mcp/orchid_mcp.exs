@@ -142,6 +142,16 @@ defmodule OrchidMCP do
           "report" => %{"type" => "string", "description" => "Progress report or completion summary"}
         }}},
 
+      %{"name" => "task_report", "description" => "Report task outcome with summary/error and optional completion",
+        "inputSchema" => %{"type" => "object", "properties" => %{
+          "goal_id" => %{"type" => "string", "description" => "Goal ID or name (optional; defaults to assigned goal)"},
+          "outcome" => %{"type" => "string", "description" => "success | failure | blocked | in_progress"},
+          "summary" => %{"type" => "string", "description" => "Short status summary"},
+          "report" => %{"type" => "string", "description" => "Detailed report text"},
+          "error" => %{"type" => "string", "description" => "Error details for failure/blocked"},
+          "mark_completed" => %{"type" => "boolean", "description" => "For success, mark goal completed (default true)"}
+        }}},
+
       %{"name" => "agent_spawn", "description" => "Spawn an agent from a template and assign it a goal",
         "inputSchema" => %{"type" => "object", "properties" => %{
           "template" => %{"type" => "string", "description" => "Template name (Coder, Codex Coder, Reverse Engineer, Shell Operator, Explorer)"},
@@ -149,9 +159,13 @@ defmodule OrchidMCP do
           "message" => %{"type" => "string", "description" => "Initial message (only if no goal_id)"}
         }}},
 
+      %{"name" => "active_agents", "description" => "List active agents with type and assigned task",
+        "inputSchema" => %{"type" => "object", "properties" => %{}}},
+
       %{"name" => "wait", "description" => "Wait up to N seconds for notifications from spawned agents",
         "inputSchema" => %{"type" => "object", "properties" => %{
-          "seconds" => %{"type" => "integer", "description" => "Max seconds to wait (1-300)"}
+          "seconds" => %{"type" => "integer", "description" => "Max seconds to wait (1-300)"},
+          "status_msg" => %{"type" => "string", "description" => "Short status message for UI (e.g. waiting for extraction results)"}
         }}},
 
       %{"name" => "list", "description" => "List files in the workspace",
@@ -273,6 +287,63 @@ defmodule OrchidMCP do
     end
   end
 
+  defp execute_tool("task_report", args, state) do
+    outcome = to_string(args["outcome"] || "")
+    summary = to_string(args["summary"] || "")
+
+    if outcome == "" or summary == "" do
+      {:error, "task_report requires outcome and summary"}
+    else
+      goal =
+        cond do
+          is_binary(args["goal_id"]) and args["goal_id"] != "" ->
+            resolve_goal(args["goal_id"], state.project_id)
+
+          is_binary(state.agent_id) ->
+            :rpc.call(@node, Orchid.Object, :list_goals_for_project, [state.project_id])
+            |> Enum.find(fn g ->
+              g.metadata[:agent_id] == state.agent_id and g.metadata[:status] != :completed
+            end)
+
+          true ->
+            nil
+        end
+
+      if is_nil(goal) do
+        {:error, "No target goal found for task_report"}
+      else
+        if outcome in ["failure", "blocked"] and (is_nil(args["error"]) or String.trim(to_string(args["error"])) == "") do
+          {:error, "error is required when outcome is failure or blocked"}
+        else
+          report = to_string(args["report"] || summary)
+          error_text = to_string(args["error"] || "")
+
+          :rpc.call(@node, Orchid.Object, :update_metadata, [
+            goal.id,
+            %{
+              completion_summary: summary,
+              report: report,
+              last_error: if(outcome in ["failure", "blocked"], do: if(String.trim(error_text) == "", do: summary, else: error_text), else: nil),
+              task_outcome: outcome,
+              reported_by_tool: true,
+              reported_at: DateTime.utc_now()
+            }
+          ])
+
+          cond do
+            outcome == "success" and Map.get(args, "mark_completed", true) ->
+              :rpc.call(@node, Orchid.Goals, :set_status, [goal.id, :completed])
+
+            true ->
+              :rpc.call(@node, Orchid.Goals, :set_status, [goal.id, :pending])
+          end
+
+          {:ok, "Reported #{outcome} for goal #{goal.name} [#{goal.id}]"}
+        end
+      end
+    end
+  end
+
   defp execute_tool("agent_spawn", %{"template" => _template} = args, state) do
     # Call Orchid's agent_spawn tool
     ctx = %{agent_state: %{project_id: state.project_id, id: state.agent_id}}
@@ -282,10 +353,82 @@ defmodule OrchidMCP do
     end
   end
 
+  defp execute_tool("active_agents", _args, state) do
+    agents = :rpc.call(@node, Orchid.Agent, :list, [])
+    goals = :rpc.call(@node, Orchid.Object, :list_goals_for_project, [state.project_id])
+
+    cond do
+      !is_list(agents) ->
+        {:error, "RPC failed listing agents: #{inspect(agents)}"}
+
+      !is_list(goals) ->
+        {:error, "RPC failed listing goals: #{inspect(goals)}"}
+
+      true ->
+        agents_for_project =
+          Enum.filter(agents, fn id ->
+            case :rpc.call(@node, Orchid.Agent, :get_state, [id]) do
+              {:ok, s} -> s.project_id == state.project_id
+              _ -> false
+            end
+          end)
+
+        text =
+          case agents_for_project do
+            [] ->
+              "No active agents for this project."
+
+            ids ->
+              lines =
+                Enum.map(ids, fn id ->
+                  case :rpc.call(@node, Orchid.Agent, :get_state, [id]) do
+                    {:ok, s} ->
+                      type =
+                        cond do
+                          s.config[:use_orchid_tools] -> "Orchestrator"
+                          s.config[:template_id] -> template_name(s.config[:template_id])
+                          true -> "Unknown"
+                        end
+
+                      task =
+                        case Enum.find(goals, fn g -> g.metadata[:agent_id] == id end) do
+                          nil -> "none"
+                          g -> "#{g.name} [#{g.id}]"
+                        end
+
+                      "#{id} | type=#{type} | task=#{task}"
+
+                    _ ->
+                      "#{id} | type=unknown | task=unknown"
+                  end
+                end)
+
+              Enum.join(lines, "\n")
+          end
+
+        {:ok, text}
+    end
+  end
+
   defp execute_tool("wait", args, state) do
     unless state.agent_id do
       {:ok, "No agent_id — cannot wait for notifications"}
     else
+      status_msg =
+        case args["status_msg"] do
+          msg when is_binary(msg) ->
+            msg
+            |> String.trim()
+            |> String.slice(0, 120)
+
+          _ ->
+            nil
+        end
+
+      if status_msg && status_msg != "" do
+        :rpc.call(@node, Orchid.Agent, :remember, [state.agent_id, "wait_status", status_msg])
+      end
+
       # Cap at 120s per wait call to avoid blocking too long
       seconds = min(max(args["seconds"] || 60, 1), 120)
       deadline = System.monotonic_time(:second) + seconds
@@ -331,6 +474,13 @@ defmodule OrchidMCP do
     if is_list(goals) do
       Enum.find(goals, fn g -> g.id == ref end) ||
         Enum.find(goals, fn g -> String.downcase(g.name) == String.downcase(ref) end)
+    end
+  end
+
+  defp template_name(template_id) do
+    case :rpc.call(@node, Orchid.Object, :get, [template_id]) do
+      {:ok, t} -> t.name
+      _ -> template_id
     end
   end
 

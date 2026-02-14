@@ -13,6 +13,13 @@ if [ -f "$ENV_FILE" ]; then
   source "$ENV_FILE"
 fi
 
+log_lifecycle() {
+  local msg="$1"
+  local ts
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  echo "[$ts] orchidctl: $msg" >> "$LOGFILE"
+}
+
 get_pid() {
   if [ -f "$PIDFILE" ]; then
     local pid=$(cat "$PIDFILE")
@@ -36,11 +43,40 @@ do_start() {
   echo "Starting Orchid..."
   mkdir -p priv/data
 
+  # Raise soft open-file limit for the server process (up to hard limit).
+  # Some shells default to soft=1024 even when hard is much higher.
+  local hard_nofile
+  hard_nofile=$(ulimit -Hn 2>/dev/null || echo "")
+  if [ -n "$hard_nofile" ]; then
+    ulimit -n "$hard_nofile" 2>/dev/null || true
+  fi
+
   elixir --name orchid@127.0.0.1 -S mix phx.server >> "$LOGFILE" 2>&1 &
   local pid=$!
-  echo "$pid" > "$PIDFILE"
-  echo "Orchid started (PID $pid)"
-  echo "Log: $LOGFILE"
+
+  # Verify process survives initial boot before reporting success
+  local healthy=1
+  for i in $(seq 1 5); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      healthy=0
+      break
+    fi
+    sleep 1
+  done
+
+  if [ "$healthy" -eq 1 ]; then
+    echo "$pid" > "$PIDFILE"
+    echo "Orchid started (PID $pid)"
+    echo "Log: $LOGFILE"
+    log_lifecycle "started pid=$pid"
+  else
+    rm -f "$PIDFILE"
+    echo "Orchid failed to start"
+    log_lifecycle "failed_to_start pid=$pid"
+    echo "Recent log output:"
+    tail -n 20 "$LOGFILE" 2>/dev/null || true
+    return 1
+  fi
 }
 
 do_stop() {
@@ -58,6 +94,7 @@ do_stop() {
     if ! kill -0 "$pid" 2>/dev/null; then
       rm -f "$PIDFILE"
       echo "Orchid stopped"
+      log_lifecycle "stopped pid=$pid graceful=true"
       return 0
     fi
     sleep 1
@@ -67,6 +104,7 @@ do_stop() {
   kill -9 "$pid" 2>/dev/null || true
   rm -f "$PIDFILE"
   echo "Orchid killed"
+  log_lifecycle "stopped pid=$pid graceful=false"
 }
 
 do_status() {

@@ -93,8 +93,8 @@ IO.puts("  project ID: #{project.id}")
 
 IO.puts("=== Creating goal ===")
 {:ok, goal} = rpc.(Orchid.Goals, :create, [
-  "manually decompile diablo 2 demo and compile to wasm",
-  "the installer is here: https://archive.org/download/DiabloIiDemo/DiabloIIDemo.exe",
+  "fully reimplement diablo 2 demo from recovered behavior",
+  "Target a full reimplementation of the Diablo II demo (no WASM porting yet). Use this installer as source material: https://archive.org/download/DiabloIiDemo/DiabloIIDemo.exe. ASM-to-C translation must be performed manually by Coder/Reverse Engineer agents; do not use automated decompiler tools to generate C from assembly.",
   project.id
 ])
 IO.puts("  goal ID: #{goal.id}")

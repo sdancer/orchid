@@ -170,11 +170,13 @@ defmodule OrchidWeb.PromptsLive do
 
     if name != "" and project_id do
       {:ok, _goal} =
-        Object.create(:goal, name, "", metadata: %{
-          project_id: project_id,
-          status: :pending,
-          depends_on: []
-        })
+        Object.create(:goal, name, "",
+          metadata: %{
+            project_id: project_id,
+            status: :pending,
+            depends_on: []
+          }
+        )
 
       {:noreply,
        assign(socket,
@@ -232,13 +234,18 @@ defmodule OrchidWeb.PromptsLive do
     {:noreply, assign(socket, :adding_dependency_to, nil)}
   end
 
-  def handle_event("add_dependency", %{"goal-id" => goal_id, "depends-on" => depends_on_id}, socket) do
+  def handle_event(
+        "add_dependency",
+        %{"goal-id" => goal_id, "depends-on" => depends_on_id},
+        socket
+      ) do
     case Object.get(goal_id) do
       {:ok, goal} ->
         current_deps = goal.metadata[:depends_on] || []
 
         if depends_on_id not in current_deps do
-          {:ok, _} = Object.update_metadata(goal_id, %{depends_on: [depends_on_id | current_deps]})
+          {:ok, _} =
+            Object.update_metadata(goal_id, %{depends_on: [depends_on_id | current_deps]})
         end
 
         {:noreply,
@@ -251,11 +258,17 @@ defmodule OrchidWeb.PromptsLive do
     end
   end
 
-  def handle_event("remove_dependency", %{"goal-id" => goal_id, "depends-on" => depends_on_id}, socket) do
+  def handle_event(
+        "remove_dependency",
+        %{"goal-id" => goal_id, "depends-on" => depends_on_id},
+        socket
+      ) do
     case Object.get(goal_id) do
       {:ok, goal} ->
         current_deps = goal.metadata[:depends_on] || []
-        {:ok, _} = Object.update_metadata(goal_id, %{depends_on: List.delete(current_deps, depends_on_id)})
+
+        {:ok, _} =
+          Object.update_metadata(goal_id, %{depends_on: List.delete(current_deps, depends_on_id)})
 
         {:noreply,
          assign(socket, :goals, Object.list_goals_for_project(socket.assigns.current_project))}
@@ -404,6 +417,14 @@ defmodule OrchidWeb.PromptsLive do
                             phx-value-id={goal.id}
                           >×</button>
                         </div>
+                        <% outcome = goal_terminal_outcome(goal) %>
+                        <% summary = goal_summary(goal) %>
+                        <%= if outcome && summary != "" do %>
+                          <div style="margin-top: 0.4rem; margin-left: 1.75rem; font-size: 0.8rem; display: flex; gap: 0.4rem; align-items: flex-start;">
+                            <span style={"padding: 0.05rem 0.35rem; border-radius: 3px; font-size: 0.7rem; #{goal_outcome_style(outcome)}"}><%= goal_outcome_label(outcome) %></span>
+                            <span style="color: #8b949e; white-space: pre-wrap; word-break: break-word;"><%= summary %></span>
+                          </div>
+                        <% end %>
                         <%= if (goal.metadata[:depends_on] || []) != [] do %>
                           <div style="margin-top: 0.5rem; margin-left: 1.75rem; font-size: 0.85rem; color: #8b949e;">
                             depends on:
@@ -568,5 +589,72 @@ defmodule OrchidWeb.PromptsLive do
       nil -> "Unknown"
       goal -> goal.name
     end
+  end
+
+  defp goal_terminal_outcome(goal) do
+    status = normalize_status(goal.metadata[:status])
+    outcome = normalize_outcome(goal.metadata[:task_outcome])
+
+    cond do
+      outcome in [:failure, :blocked] -> outcome
+      status == :completed -> :success
+      outcome == :success -> :success
+      true -> nil
+    end
+  end
+
+  defp goal_summary(goal) do
+    outcome = normalize_outcome(goal.metadata[:task_outcome])
+
+    first_nonempty([
+      if(outcome in [:failure, :blocked], do: goal.metadata[:last_error], else: nil),
+      goal.metadata[:completion_summary],
+      goal.metadata[:report],
+      if(outcome in [:failure, :blocked], do: goal.metadata[:last_error], else: nil)
+    ])
+  end
+
+  defp goal_outcome_label(:success), do: "Completed"
+  defp goal_outcome_label(:failure), do: "Failed"
+  defp goal_outcome_label(:blocked), do: "Blocked"
+  defp goal_outcome_label(_), do: "Done"
+
+  defp goal_outcome_style(:success), do: "background: #0e2a15; color: #7ee787;"
+  defp goal_outcome_style(:failure), do: "background: #3d1114; color: #f85149;"
+  defp goal_outcome_style(:blocked), do: "background: #2d2000; color: #d29922;"
+  defp goal_outcome_style(_), do: "background: #21262d; color: #8b949e;"
+
+  defp normalize_status(v) when is_atom(v), do: v
+
+  defp normalize_status(v) when is_binary(v) do
+    case String.downcase(v) do
+      "completed" -> :completed
+      "pending" -> :pending
+      _ -> nil
+    end
+  end
+
+  defp normalize_status(_), do: nil
+
+  defp normalize_outcome(v) when is_atom(v), do: v
+
+  defp normalize_outcome(v) when is_binary(v) do
+    case String.downcase(v) do
+      "success" -> :success
+      "failure" -> :failure
+      "blocked" -> :blocked
+      "in_progress" -> :in_progress
+      _ -> nil
+    end
+  end
+
+  defp normalize_outcome(_), do: nil
+
+  defp first_nonempty(values) do
+    values
+    |> Enum.find("", fn v ->
+      is_binary(v) and String.trim(v) != ""
+    end)
+    |> String.trim()
   end
 end

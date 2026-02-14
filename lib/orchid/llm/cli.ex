@@ -24,14 +24,15 @@ defmodule Orchid.LLM.CLI do
     Logger.debug("Claude CLI args: #{inspect(args)}")
 
     # Run in a Task to avoid blocking the caller
-    task = Task.async(fn ->
-      cmd = build_shell_command(args, config) <> " 2>&1"
-      Logger.info("CLI exec (full): #{cmd}")
-      output = :os.cmd(String.to_charlist(cmd))
-      result = to_string(output) |> String.trim()
-      Logger.info("CLI result (#{byte_size(result)} bytes): #{String.slice(result, 0, 500)}")
-      result
-    end)
+    task =
+      Task.async(fn ->
+        cmd = build_shell_command(args, config) <> " 2>&1"
+        Logger.info("CLI exec (full): #{cmd}")
+        output = :os.cmd(String.to_charlist(cmd))
+        result = to_string(output) |> String.trim()
+        Logger.info("CLI result (#{byte_size(result)} bytes): #{String.slice(result, 0, 500)}")
+        result
+      end)
 
     # Orchestrators with MCP tools need much longer — they spawn agents and wait
     timeout = if config[:use_orchid_tools], do: 3_600_000, else: 600_000
@@ -80,6 +81,7 @@ defmodule Orchid.LLM.CLI do
       config[:use_orchid_tools] && config[:project_id] ->
         mcp_config = orchid_mcp_config(config[:project_id], config[:agent_id])
         escaped_args = Enum.map(args, &shell_escape/1)
+
         "CLAUDECODE= #{claude_path} #{Enum.join(escaped_args, " ")} --mcp-config #{shell_escape(mcp_config)} --strict-mcp-config --tools ''"
 
       # Worker agent — run inside sandbox container
@@ -105,12 +107,15 @@ defmodule Orchid.LLM.CLI do
       mcpServers: %{
         orchid: %{
           command: "elixir",
-          args: [
-            "--name", "mcp-#{:erlang.unique_integer([:positive])}@127.0.0.1",
-            "--cookie", cookie,
-            script,
-            project_id
-          ] ++ if(agent_id, do: [agent_id], else: [])
+          args:
+            [
+              "--name",
+              "mcp-#{:erlang.unique_integer([:positive])}@127.0.0.1",
+              "--cookie",
+              cookie,
+              script,
+              project_id
+            ] ++ if(agent_id, do: [agent_id], else: [])
         }
       }
     }
@@ -168,6 +173,14 @@ defmodule Orchid.LLM.CLI do
     # Orchid's agent loop handles higher-level re-kicking if needed
     max_turns = config[:max_turns] || 100
     args = args ++ ["--max-turns", to_string(max_turns)]
+
+    # Disable tools entirely for one-shot meta tasks (summarization/review)
+    args =
+      if config[:disable_tools] do
+        args ++ ["--tools", ""]
+      else
+        args
+      end
 
     # Allowed tools
     args =

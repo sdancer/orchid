@@ -7,6 +7,7 @@ defmodule Orchid.GoalWatcher do
   """
   use GenServer
   require Logger
+  alias Orchid.LLM
 
   @interval :timer.seconds(10)
   @log_file "priv/data/goal_watcher.log"
@@ -34,7 +35,10 @@ defmodule Orchid.GoalWatcher do
         check_projects(state)
       rescue
         e ->
-          log("CRASH in check_projects: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}")
+          log(
+            "CRASH in check_projects: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
+          )
+
           state
       catch
         kind, reason ->
@@ -93,7 +97,9 @@ defmodule Orchid.GoalWatcher do
       end)
 
     if orphaned != [] do
-      log("project \"#{project.name}\": #{length(orphaned)} goal(s) assigned to dead agents — clearing assignments")
+      log(
+        "project \"#{project.name}\": #{length(orphaned)} goal(s) assigned to dead agents — clearing assignments"
+      )
 
       for goal <- orphaned do
         Orchid.Object.update_metadata(goal.id, %{agent_id: nil})
@@ -102,7 +108,11 @@ defmodule Orchid.GoalWatcher do
     end
 
     # Clean dead agents from kicked tracking
-    state = %{state | kicked_agents: Map.reject(state.kicked_agents, fn {id, _} -> id not in running_agent_ids end)}
+    state = %{
+      state
+      | kicked_agents:
+          Map.reject(state.kicked_agents, fn {id, _} -> id not in running_agent_ids end)
+    }
 
     # 2. No agents at all → spawn planner
     if project_agents == [] do
@@ -115,7 +125,10 @@ defmodule Orchid.GoalWatcher do
           pending_goals
         end
 
-      log("project \"#{project.name}\" has #{length(pending)} pending goal(s), 0 agents — spawning planner")
+      log(
+        "project \"#{project.name}\" has #{length(pending)} pending goal(s), 0 agents — spawning planner"
+      )
+
       spawn_planner(project, pending)
       state
     else
@@ -149,7 +162,9 @@ defmodule Orchid.GoalWatcher do
             last_role = List.last(agent_state.messages) && List.last(agent_state.messages).role
 
             if last_role in [:user, :tool] do
-              log("agent #{agent_state.id} (#{tag}) idle, last msg=#{last_role}, goals: #{goal_names} — retrying")
+              log(
+                "agent #{agent_state.id} (#{tag}) idle, last msg=#{last_role}, goals: #{goal_names} — retrying"
+              )
 
               Task.start(fn ->
                 case Orchid.Agent.retry(agent_state.id) do
@@ -158,14 +173,16 @@ defmodule Orchid.GoalWatcher do
                     log("agent #{agent_state.id} (#{tag}) retry responded: #{preview}")
 
                   {:error, reason} ->
-                    log("ERROR: agent #{agent_state.id} (#{tag}) retry failed: #{inspect(reason)}")
+                    log(
+                      "ERROR: agent #{agent_state.id} (#{tag}) retry failed: #{inspect(reason)}"
+                    )
                 end
               end)
             else
               log("agent #{agent_state.id} (#{tag}) idle, goals: #{goal_names} — re-kicking")
 
               Task.start(fn ->
-                message = "Continue working on your pending goals. Use `goal_list` to check current state."
+                message = build_rekick_message(agent_state, assigned_pending)
 
                 case Orchid.Agent.stream(agent_state.id, message, fn _chunk -> :ok end) do
                   {:ok, response} ->
@@ -173,7 +190,9 @@ defmodule Orchid.GoalWatcher do
                     log("agent #{agent_state.id} (#{tag}) re-kick responded: #{preview}")
 
                   {:error, reason} ->
-                    log("ERROR: agent #{agent_state.id} (#{tag}) re-kick failed: #{inspect(reason)}")
+                    log(
+                      "ERROR: agent #{agent_state.id} (#{tag}) re-kick failed: #{inspect(reason)}"
+                    )
                 end
               end)
             end
@@ -212,8 +231,11 @@ defmodule Orchid.GoalWatcher do
 
         # Ensure sandbox is running before spawning agent
         case Orchid.Projects.ensure_sandbox(project.id) do
-          {:ok, _} -> log("sandbox ready for project \"#{project.name}\"")
-          {:error, reason} -> log("WARNING: sandbox failed for project \"#{project.name}\": #{inspect(reason)}")
+          {:ok, _} ->
+            log("sandbox ready for project \"#{project.name}\"")
+
+          {:error, reason} ->
+            log("WARNING: sandbox failed for project \"#{project.name}\": #{inspect(reason)}")
         end
 
         config = %{
@@ -223,13 +245,15 @@ defmodule Orchid.GoalWatcher do
           project_id: project.id
         }
 
-        config = if planner.metadata[:model],
-          do: Map.put(config, :model, planner.metadata[:model]),
-          else: config
+        config =
+          if planner.metadata[:model],
+            do: Map.put(config, :model, planner.metadata[:model]),
+            else: config
 
-        config = if planner.metadata[:use_orchid_tools],
-          do: Map.put(config, :use_orchid_tools, true),
-          else: config
+        config =
+          if planner.metadata[:use_orchid_tools],
+            do: Map.put(config, :use_orchid_tools, true),
+            else: config
 
         case Orchid.Agent.create(config) do
           {:ok, agent_id} ->
@@ -278,14 +302,19 @@ defmodule Orchid.GoalWatcher do
   defp agent_tag(agent_state) do
     provider = agent_state.config[:provider] || "?"
     model = agent_state.config[:model]
-    tname = case agent_state.config[:template_id] do
-      nil -> nil
-      tid ->
-        case Orchid.Object.get(tid) do
-          {:ok, t} -> t.name
-          _ -> nil
-        end
-    end
+
+    tname =
+      case agent_state.config[:template_id] do
+        nil ->
+          nil
+
+        tid ->
+          case Orchid.Object.get(tid) do
+            {:ok, t} -> t.name
+            _ -> nil
+          end
+      end
+
     tname || "#{provider}#{if model, do: "/#{model}", else: ""}"
   end
 
@@ -294,5 +323,128 @@ defmodule Orchid.GoalWatcher do
     line = "[#{ts}] GoalWatcher: #{msg}\n"
     File.write!(@log_file, line, [:append])
     Logger.info("GoalWatcher: #{msg}")
+  end
+
+  defp build_rekick_message(agent_state, assigned_pending) do
+    goal_names = Enum.map_join(assigned_pending, ", ", & &1.name)
+    assistant_msg = last_assistant_message(agent_state)
+
+    case summarize_last_update(assistant_msg, assigned_pending) do
+      {:ok, %{status: status, summary: summary, error: error}} ->
+        """
+        Review of your last update (Haiku):
+        - Status: #{status}
+        - Summary: #{summary}
+        #{if(error, do: "- Error: #{error}", else: "")}
+
+        Pending goals: #{goal_names}
+
+        If work is complete, call `goal_update` with status `completed` and include a concise report.
+        If blocked, continue execution and report the exact failing command/output.
+        """
+        |> String.trim()
+
+      _ ->
+        "Pending goals: #{goal_names}. Continue execution and report exact command/output for progress or blockers."
+    end
+  end
+
+  defp summarize_last_update(last_msg, goals) do
+    goal_text =
+      goals
+      |> Enum.map(fn g -> "- #{g.name}: #{g.content || ""}" end)
+      |> Enum.join("\n")
+
+    system = """
+    You summarize worker status for orchestration.
+    Return exactly one JSON object in a single response. Do not call tools.
+    Return strict JSON only with keys:
+    - status: one of "completed", "error", "in_progress", "unknown"
+    - summary: short string (<= 220 chars)
+    - error: string or null
+    Be conservative.
+    """
+
+    user = """
+    Goals:
+    #{goal_text}
+
+    Last assistant message:
+    #{truncate(last_msg || "(none)", 6000)}
+    """
+
+    context = %{
+      system: system,
+      messages: [%{role: :user, content: String.trim(user)}],
+      objects: "",
+      memory: %{}
+    }
+
+    config = %{provider: :cli, model: :haiku, max_turns: 8, max_tokens: 500, disable_tools: true}
+
+    with {:ok, %{content: raw}} <- LLM.chat(config, context),
+         {:ok, parsed} <- parse_summary_json(raw) do
+      {:ok, parsed}
+    end
+  end
+
+  defp parse_summary_json(raw) when is_binary(raw) do
+    parsed =
+      case Jason.decode(raw) do
+        {:ok, v} ->
+          v
+
+        _ ->
+          case Regex.run(~r/\{.*\}/s, raw) do
+            [json] ->
+              case Jason.decode(json) do
+                {:ok, v} -> v
+                _ -> nil
+              end
+
+            _ ->
+              nil
+          end
+      end
+
+    case parsed do
+      %{"status" => status, "summary" => summary} when is_binary(status) and is_binary(summary) ->
+        normalized =
+          case status do
+            "completed" -> "completed"
+            "error" -> "error"
+            "in_progress" -> "in_progress"
+            _ -> "unknown"
+          end
+
+        err =
+          case Map.get(parsed, "error") do
+            e when is_binary(e) and e != "" -> e
+            _ -> nil
+          end
+
+        {:ok, %{status: normalized, summary: truncate(summary, 220), error: err}}
+
+      _ ->
+        {:error, :invalid_summary}
+    end
+  end
+
+  defp last_assistant_message(agent_state) do
+    agent_state.messages
+    |> Enum.reverse()
+    |> Enum.find(fn msg -> msg.role == :assistant end)
+    |> case do
+      nil -> nil
+      msg -> msg.content
+    end
+  end
+
+  defp truncate(text, max) when is_binary(text) and is_integer(max) and max > 0 do
+    if String.length(text) > max do
+      String.slice(text, 0, max) <> "..."
+    else
+      text
+    end
   end
 end

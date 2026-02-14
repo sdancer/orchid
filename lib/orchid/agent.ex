@@ -95,12 +95,22 @@ defmodule Orchid.Agent do
   end
 
   @doc """
+  Execute completion review for assigned goals.
+  Called by GoalReviewQueue to serialize reviewer LLM traffic.
+  """
+  def run_completion_review(agent_id, project_id, report)
+      when is_binary(agent_id) and is_binary(project_id) and is_binary(report) do
+    review_and_finalize_goals(agent_id, project_id, report)
+  end
+
+  @doc """
   Retry the last LLM call without adding a new message.
   Use when the agent failed mid-turn and the last message is already in history.
   """
   def retry(agent_id, callback \\ fn _chunk -> :ok end) do
     caller = self()
     cast(agent_id, {:retry, {callback, caller}})
+
     receive do
       {:agent_done, ^agent_id, result} -> result
     after
@@ -145,9 +155,9 @@ defmodule Orchid.Agent do
   @doc """
   Stop an agent.
   """
-  def stop(agent_id) do
+  def stop(agent_id, reason \\ :manual_stop) do
     case Registry.lookup(Orchid.Registry, agent_id) do
-      [{pid, _}] -> GenServer.stop(pid)
+      [{pid, _}] -> GenServer.stop(pid, reason)
       [] -> {:error, :not_found}
     end
   end
@@ -218,7 +228,10 @@ defmodule Orchid.Agent do
         state
       end
 
-    Logger.info("Agent #{id} started, project=#{inspect(state.project_id)}, provider=#{config[:provider]}, model=#{config[:model]}")
+    Logger.info(
+      "Agent #{id} started, project=#{inspect(state.project_id)}, provider=#{config[:provider]}, model=#{config[:model]}"
+    )
+
     publish_state(state)
     Store.put_agent_state(id, state)
     {:ok, state}
@@ -271,18 +284,28 @@ defmodule Orchid.Agent do
   end
 
   def handle_call(:drain_notifications, _from, state) do
-    {:reply, {:ok, state.notifications}, %{state | notifications: []}}
+    new_state = %{state | notifications: []}
+    publish_state(new_state)
+    Store.put_agent_state(new_state.id, new_state)
+    {:reply, {:ok, state.notifications}, new_state}
   end
 
   @impl true
   def handle_cast({:notify, message}, state) do
-    state = %{state | notifications: state.notifications ++ [message]}
+    state =
+      state
+      |> add_message(:notification, message)
+      |> then(fn s -> %{s | notifications: s.notifications ++ [message]} end)
+
+    publish_state(state)
+    Store.put_agent_state(state.id, state)
     {:noreply, state}
   end
 
   def handle_cast({:retry, notify}, state) do
     # Re-run the LLM without adding a new message (last message already in history)
     state = %{state | status: :thinking}
+    state = %{state | memory: Map.put(state.memory, :task_report_used_in_turn, false)}
     publish_state(state)
 
     agent_pid = self()
@@ -321,6 +344,7 @@ defmodule Orchid.Agent do
 
   def handle_cast({:run, message, notify}, state) do
     state = %{state | status: :thinking}
+    state = %{state | memory: Map.put(state.memory, :task_report_used_in_turn, false)}
     state = add_message(state, :user, message)
     publish_state(state)
 
@@ -370,10 +394,12 @@ defmodule Orchid.Agent do
     new_state = %{new_state | status: :idle, notifications: state.notifications}
 
     agent_tag = agent_log_tag(new_state)
+
     case result do
       {:ok, response} ->
         preview = (response || "") |> String.slice(0, 150) |> String.replace("\n", " ")
         Logger.info("Agent #{new_state.id} (#{agent_tag}) done: #{preview}")
+
       {:error, reason} ->
         Logger.error("Agent #{new_state.id} (#{agent_tag}) failed: #{inspect(reason)}")
     end
@@ -381,44 +407,81 @@ defmodule Orchid.Agent do
     publish_state(new_state)
     Store.put_agent_state(new_state.id, new_state)
 
-    # Auto-complete assigned goals for worker CLI/Codex agents (not orchestrators, not on error)
+    # Auto-complete assigned goals for worker CLI/Codex agents (not orchestrators, not on error).
+    # If the worker already used task_report in this turn, skip reviewer auto-finalization.
     if new_state.config[:provider] in [:cli, :codex] &&
-       new_state.project_id &&
-       !new_state.config[:use_orchid_tools] &&
-       match?({:ok, _}, result) do
-      auto_complete_goals(new_state, result)
+         new_state.project_id &&
+         !new_state.config[:use_orchid_tools] &&
+         match?({:ok, _}, result) do
+      response =
+        case result do
+          {:ok, content} -> content
+          other -> other
+        end
+
+      unless task_report_used_in_turn?(state, new_state) do
+        Orchid.GoalReviewQueue.enqueue(
+          new_state.id,
+          new_state.project_id,
+          normalize_report(response)
+        )
+      end
     end
 
-    # Worker agents: stop when done (success or failure)
-    # On success: goals are auto-completed, agent has nothing left to do
-    # On error: agent is broken, GoalWatcher will clear the assignment and retry with a fresh agent
+    # Worker agents: always stop when done (success or failure).
+    # GoalWatcher can clear/reassign orphaned pending goals if any remain.
     if new_state.project_id && !new_state.config[:use_orchid_tools] do
       case result do
         {:error, reason} ->
-          Logger.info("Agent #{new_state.id} (#{agent_tag}) stopping after error: #{inspect(reason)}")
-          {:stop, :normal, new_state}
+          annotate_assigned_goals_error(new_state, reason)
+          notify_orchestrator_of_failures(new_state, reason)
+
+          Logger.info(
+            "Agent #{new_state.id} (#{agent_tag}) stopping after error: #{inspect(reason)}"
+          )
+
+          {:stop, {:worker_error, truncate(inspect(reason), 800)}, new_state}
 
         {:ok, _} ->
-          has_pending =
-            Orchid.Object.list_goals_for_project(new_state.project_id)
-            |> Enum.any?(fn g ->
-              g.metadata[:agent_id] == new_state.id and g.metadata[:status] != :completed
-            end)
-
-          unless has_pending do
-            Logger.info("Agent #{new_state.id} (#{agent_tag}) has no pending goals — stopping")
-            {:stop, :normal, new_state}
-          else
-            {:noreply, new_state}
-          end
+          Logger.info("Agent #{new_state.id} (#{agent_tag}) stopping after successful run")
+          {:stop, :normal, new_state}
       end
     else
       {:noreply, new_state}
     end
   end
 
+  defp notify_orchestrator_of_failures(state, reason) do
+    goals =
+      Orchid.Object.list_goals_for_project(state.project_id)
+      |> Enum.filter(fn g ->
+        g.metadata[:agent_id] == state.id and g.metadata[:status] != :completed
+      end)
+
+    for goal <- goals do
+      with parent_id when not is_nil(parent_id) <- goal.metadata[:parent_goal_id],
+           {:ok, parent} <- Orchid.Object.get(parent_id),
+           orchestrator_id when not is_nil(orchestrator_id) <- parent.metadata[:agent_id] do
+        message =
+          """
+          Goal failed: "#{goal.name}" [#{goal.id}]
+          Worker agent: #{state.id}
+          Error: #{inspect(reason)}
+
+          Check `goal_read` for context, fix the blocker, and reassign.
+          """
+          |> String.trim()
+
+        Orchid.Agent.notify(orchestrator_id, message)
+      else
+        _ -> :ok
+      end
+    end
+  end
+
   @impl true
-  def terminate(_reason, state) do
+  def terminate(reason, state) do
+    maybe_notify_creator_on_terminate(reason, state)
     :ets.delete(:orchid_agent_states, state.id)
     Store.delete_agent_state(state.id)
     :ok
@@ -431,30 +494,94 @@ defmodule Orchid.Agent do
     template = state.config[:template_id]
 
     # Look up template name
-    tname = if template do
-      case Orchid.Object.get(template) do
-        {:ok, t} -> t.name
-        _ -> nil
+    tname =
+      if template do
+        case Orchid.Object.get(template) do
+          {:ok, t} -> t.name
+          _ -> nil
+        end
       end
-    end
 
     # Look up assigned goal
-    gname = if state.project_id do
-      Orchid.Object.list_goals_for_project(state.project_id)
-      |> Enum.find(fn g -> g.metadata[:agent_id] == state.id end)
-      |> case do
-        nil -> nil
-        g -> g.name
+    gname =
+      if state.project_id do
+        Orchid.Object.list_goals_for_project(state.project_id)
+        |> Enum.find(fn g -> g.metadata[:agent_id] == state.id end)
+        |> case do
+          nil -> nil
+          g -> g.name
+        end
       end
-    end
 
     parts = [tname || "#{provider}#{if model, do: "/#{model}", else: ""}"]
     parts = if gname, do: parts ++ ["goal: #{gname}"], else: parts
     Enum.join(parts, ", ")
   end
 
-  # Auto-complete goals for CLI agents that can't call goal_update themselves
-  defp auto_complete_goals(state, result) do
+  # Worker agents cannot be trusted to self-certify completion.
+  # Route final reports through a lightweight completion reviewer model.
+  defp review_and_finalize_goals(agent_id, project_id, report) do
+    goals = Orchid.Object.list_goals_for_project(project_id)
+
+    assigned_pending =
+      Enum.filter(goals, fn g ->
+        g.metadata[:agent_id] == agent_id and g.metadata[:status] != :completed
+      end)
+
+    for goal <- assigned_pending do
+      case review_goal_completion(goal, project_id, report) do
+        {:ok, %{completed: true, summary: summary}} ->
+          Logger.info(
+            "Agent #{agent_id}: reviewer approved completion for \"#{goal.name}\" [#{goal.id}]"
+          )
+
+          Orchid.Goals.set_status(goal.id, :completed)
+
+          Orchid.Object.update_metadata(goal.id, %{
+            report: report,
+            completion_summary: summary,
+            last_error: nil,
+            reviewed_by: "haiku"
+          })
+
+        {:ok, %{completed: false, summary: summary, error: error}} ->
+          Logger.warning(
+            "Agent #{agent_id}: reviewer kept goal pending \"#{goal.name}\" [#{goal.id}]"
+          )
+
+          Orchid.Object.update_metadata(goal.id, %{
+            status: :pending,
+            report: report,
+            completion_summary: summary,
+            last_error: error || "Reviewer marked incomplete",
+            reviewed_by: "haiku"
+          })
+
+        {:error, reason} ->
+          Logger.error(
+            "Agent #{agent_id}: completion review failed for \"#{goal.name}\" [#{goal.id}]: #{inspect(reason)}"
+          )
+
+          Orchid.Object.update_metadata(goal.id, %{
+            status: :pending,
+            report: report,
+            completion_summary: nil,
+            last_error: "Completion review failed: #{inspect(reason)}",
+            reviewed_by: "haiku"
+          })
+      end
+    end
+  end
+
+  defp task_report_used_in_turn?(old_state, new_state) do
+    old_len = length(old_state.tool_history)
+
+    new_state.tool_history
+    |> Enum.drop(old_len)
+    |> Enum.any?(fn tr -> tr.tool == "task_report" end)
+  end
+
+  defp annotate_assigned_goals_error(state, reason) do
     goals = Orchid.Object.list_goals_for_project(state.project_id)
 
     assigned_pending =
@@ -462,13 +589,66 @@ defmodule Orchid.Agent do
         g.metadata[:agent_id] == state.id and g.metadata[:status] != :completed
       end)
 
-    report = result || last_assistant_message(state)
+    if assigned_pending != [] do
+      report = normalize_report(last_assistant_message(state))
+      error_summary = truncate("Worker failed: #{inspect(reason)}", 1_000)
 
-    for goal <- assigned_pending do
-      Logger.info("Agent #{state.id}: auto-completing goal \"#{goal.name}\" [#{goal.id}]")
-      Orchid.Goals.set_status(goal.id, :completed)
-      # Store the report on the goal metadata so orchestrator can read it
-      Orchid.Object.update_metadata(goal.id, %{report: report})
+      for goal <- assigned_pending do
+        Orchid.Object.update_metadata(goal.id, %{
+          status: :pending,
+          report: report,
+          completion_summary: "Worker exited with error before completion.",
+          last_error: error_summary
+        })
+      end
+    end
+  end
+
+  defp review_goal_completion(goal, project_id, report) do
+    files = collect_project_artifacts(project_id, 60)
+    files_text = if files == [], do: "(none)", else: Enum.join(files, "\n")
+
+    system = """
+    You are a strict goal completion reviewer.
+    Decide if the submitted work actually completes the goal.
+    Return exactly one JSON object in a single response. Do not call tools.
+    Return JSON only with keys:
+    - completed (boolean)
+    - summary (string, <= 240 chars)
+    - error (string or null). If completed=true, set error to null.
+    Be conservative: if evidence is weak or missing, completed must be false.
+    """
+
+    user = """
+    Goal: #{goal.name}
+    Goal Description:
+    #{goal.content || "(none)"}
+
+    Worker Report:
+    #{truncate(report, 10_000)}
+
+    Workspace Artifacts:
+    #{truncate(files_text, 4_000)}
+    """
+
+    context = %{
+      system: system,
+      messages: [%{role: :user, content: String.trim(user)}],
+      objects: "",
+      memory: %{}
+    }
+
+    config = %{
+      provider: :cli,
+      model: :haiku,
+      max_tokens: 600,
+      max_turns: 8,
+      disable_tools: true
+    }
+
+    with {:ok, %{content: raw}} <- LLM.chat(config, context),
+         {:ok, decision} <- decode_reviewer_json(raw) do
+      {:ok, decision}
     end
   end
 
@@ -479,6 +659,152 @@ defmodule Orchid.Agent do
     |> case do
       nil -> "(no response)"
       msg -> msg.content || "(empty)"
+    end
+  end
+
+  defp decode_reviewer_json(raw) when is_binary(raw) do
+    candidate =
+      case Jason.decode(raw) do
+        {:ok, parsed} ->
+          parsed
+
+        _ ->
+          case Regex.run(~r/\{.*\}/s, raw) do
+            [json] ->
+              case Jason.decode(json) do
+                {:ok, parsed} -> parsed
+                _ -> nil
+              end
+
+            _ ->
+              nil
+          end
+      end
+
+    case candidate do
+      %{"completed" => completed, "summary" => summary}
+      when is_boolean(completed) and is_binary(summary) ->
+        error =
+          case Map.get(candidate, "error") do
+            nil -> nil
+            e when is_binary(e) and e != "" -> e
+            _ -> nil
+          end
+
+        {:ok, %{completed: completed, summary: truncate(summary, 240), error: error}}
+
+      _ ->
+        {:error, {:invalid_reviewer_output, truncate(raw, 600)}}
+    end
+  end
+
+  defp collect_project_artifacts(nil, _limit), do: []
+
+  defp collect_project_artifacts(project_id, limit) do
+    files_root = Orchid.Project.files_path(project_id)
+    upper_root = Path.join([Orchid.Project.data_dir(), "sandboxes", project_id, "upper"])
+
+    files =
+      list_regular_files(files_root)
+      |> Enum.map(&Path.relative_to(&1, files_root))
+
+    upper =
+      list_regular_files(upper_root)
+      |> Enum.map(&Path.relative_to(&1, upper_root))
+
+    (files ++ upper)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.take(limit)
+  end
+
+  defp list_regular_files(root) do
+    if File.dir?(root) do
+      root
+      |> Path.join("**/*")
+      |> Path.wildcard(match_dot: true)
+      |> Enum.filter(&File.regular?/1)
+    else
+      []
+    end
+  end
+
+  defp normalize_report({:ok, report}), do: normalize_report(report)
+  defp normalize_report({:error, reason}), do: normalize_report("Error: #{inspect(reason)}")
+  defp normalize_report(report), do: truncate(to_string(report || ""), 20_000)
+
+  defp maybe_notify_creator_on_terminate(reason, state) do
+    case termination_notice(reason, state) do
+      nil ->
+        :ok
+
+      notice ->
+        case resolve_creator_agent_id(state) do
+          creator_id when is_binary(creator_id) and creator_id != state.id ->
+            Orchid.Agent.notify(creator_id, notice)
+
+          _ ->
+            :ok
+        end
+    end
+  end
+
+  defp termination_notice(:manual_stop, state) do
+    "Agent #{state.id} was stopped manually."
+  end
+
+  defp termination_notice({:shutdown, :manual_stop}, state),
+    do: termination_notice(:manual_stop, state)
+
+  defp termination_notice({:worker_error, reason}, state) do
+    """
+    Agent #{state.id} stopped after an error.
+    Error: #{reason}
+    """
+    |> String.trim()
+  end
+
+  defp termination_notice(:normal, _state), do: nil
+  defp termination_notice(:shutdown, _state), do: nil
+
+  defp termination_notice(reason, state) do
+    """
+    Agent #{state.id} crashed/stopped unexpectedly.
+    Reason: #{truncate(inspect(reason), 800)}
+    """
+    |> String.trim()
+  end
+
+  defp resolve_creator_agent_id(state) do
+    case state.config[:creator_agent_id] do
+      id when is_binary(id) and id != "" ->
+        id
+
+      _ ->
+        infer_creator_from_goal_hierarchy(state)
+    end
+  end
+
+  defp infer_creator_from_goal_hierarchy(%{project_id: nil}), do: nil
+
+  defp infer_creator_from_goal_hierarchy(state) do
+    goals = Orchid.Object.list_goals_for_project(state.project_id)
+
+    with %{metadata: meta} <- Enum.find(goals, fn g -> g.metadata[:agent_id] == state.id end),
+         parent_id when is_binary(parent_id) <- meta[:parent_goal_id],
+         {:ok, parent_goal} <- Orchid.Object.get(parent_id),
+         creator_id when is_binary(creator_id) <- parent_goal.metadata[:agent_id] do
+      creator_id
+    else
+      _ -> nil
+    end
+  end
+
+  defp truncate(text, max) when is_binary(text) and is_integer(max) and max > 0 do
+    if String.length(text) > max do
+      String.slice(text, 0, max) <> "..."
+    else
+      text
     end
   end
 
@@ -591,7 +917,8 @@ defmodule Orchid.Agent do
     do_llm_retry(config, context, callback, 0, agent_pid)
   end
 
-  defp do_llm_retry(config, context, callback, attempt, _agent_pid) when attempt >= @max_retries do
+  defp do_llm_retry(config, context, callback, attempt, _agent_pid)
+       when attempt >= @max_retries do
     LLM.chat_stream(config, context, callback)
   end
 
@@ -600,10 +927,34 @@ defmodule Orchid.Agent do
       {:ok, _} = success ->
         success
 
+      {:error, "Codex returned empty response"} ->
+        backoff = min((@initial_backoff * :math.pow(2, attempt)) |> round(), 30_000)
+
+        Logger.warning(
+          "Agent LLM call returned empty response, retry #{attempt + 1}/#{@max_retries} in #{backoff}ms"
+        )
+
+        if agent_pid,
+          do:
+            send(
+              agent_pid,
+              {:update_status, {:retrying, attempt + 1, @max_retries, :empty_response}}
+            )
+
+        Process.sleep(backoff)
+        if agent_pid, do: send(agent_pid, {:update_status, :thinking})
+        do_llm_retry(config, context, callback, attempt + 1, agent_pid)
+
       {:error, {:api_error, status, _}} when status in [429, 500, 502, 503, 504] ->
-        backoff = min(@initial_backoff * :math.pow(2, attempt) |> round(), 30_000)
-        Logger.warning("Agent LLM call failed (#{status}), retry #{attempt + 1}/#{@max_retries} in #{backoff}ms")
-        if agent_pid, do: send(agent_pid, {:update_status, {:retrying, attempt + 1, @max_retries, status}})
+        backoff = min((@initial_backoff * :math.pow(2, attempt)) |> round(), 30_000)
+
+        Logger.warning(
+          "Agent LLM call failed (#{status}), retry #{attempt + 1}/#{@max_retries} in #{backoff}ms"
+        )
+
+        if agent_pid,
+          do: send(agent_pid, {:update_status, {:retrying, attempt + 1, @max_retries, status}})
+
         Process.sleep(backoff)
         if agent_pid, do: send(agent_pid, {:update_status, :thinking})
         do_llm_retry(config, context, callback, attempt + 1, agent_pid)
@@ -662,7 +1013,14 @@ defmodule Orchid.Agent do
     # Handle wait tool's special notification return
     case result do
       {:notifications, messages, _tool_result} ->
-        tool_record = %{id: tool_id, tool: name, args: args, result: {:ok, "notifications"}, timestamp: DateTime.utc_now()}
+        tool_record = %{
+          id: tool_id,
+          tool: name,
+          args: args,
+          result: {:ok, "notifications"},
+          timestamp: DateTime.utc_now()
+        }
+
         state = %{state | tool_history: state.tool_history ++ [tool_record]}
 
         formatted = %{
@@ -674,7 +1032,14 @@ defmodule Orchid.Agent do
         {state, {:notifications, messages, formatted}}
 
       _ ->
-        tool_record = %{id: tool_id, tool: name, args: args, result: result, timestamp: DateTime.utc_now()}
+        tool_record = %{
+          id: tool_id,
+          tool: name,
+          args: args,
+          result: result,
+          timestamp: DateTime.utc_now()
+        }
+
         state = %{state | tool_history: state.tool_history ++ [tool_record]}
 
         formatted = %{

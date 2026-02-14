@@ -47,6 +47,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:template_use_orchid_tools, false)
       |> assign(:sandbox_statuses, %{})
       |> assign(:agent_status, :idle)
+      |> assign(:agent_wait_status, nil)
       |> assign(:system_prompt, nil)
       |> assign(:show_system_prompt, false)
 
@@ -59,6 +60,7 @@ defmodule OrchidWeb.AgentLive do
             socket
             |> assign(:messages, format_messages(state.messages))
             |> assign(:agent_status, state.status)
+            |> assign(:agent_wait_status, wait_status_from_memory(state.memory))
             |> assign(:system_prompt, state.config[:system_prompt])
             |> assign(:current_agent_template, template_info)
             |> then(fn s ->
@@ -108,6 +110,8 @@ defmodule OrchidWeb.AgentLive do
 
             socket
             |> assign(:messages, format_messages(state.messages))
+            |> assign(:agent_status, state.status)
+            |> assign(:agent_wait_status, wait_status_from_memory(state.memory))
             |> assign(:current_agent_template, template_info)
             |> assign(:system_prompt, state.config[:system_prompt])
             |> assign(:show_system_prompt, false)
@@ -124,6 +128,8 @@ defmodule OrchidWeb.AgentLive do
           _ ->
             socket
             |> assign(:messages, [])
+            |> assign(:agent_status, :idle)
+            |> assign(:agent_wait_status, nil)
             |> assign(:current_agent_template, nil)
             |> assign(:system_prompt, nil)
             |> assign(:show_system_prompt, false)
@@ -131,6 +137,8 @@ defmodule OrchidWeb.AgentLive do
       else
         socket
         |> assign(:messages, [])
+        |> assign(:agent_status, :idle)
+        |> assign(:agent_wait_status, nil)
         |> assign(:current_agent_template, nil)
         |> assign(:system_prompt, nil)
         |> assign(:show_system_prompt, false)
@@ -171,9 +179,12 @@ defmodule OrchidWeb.AgentLive do
             system_prompt: template.content,
             template_id: template_id
           }
-          config = if template.metadata[:model],
-            do: Map.put(config, :model, template.metadata[:model]),
-            else: config
+
+          config =
+            if template.metadata[:model],
+              do: Map.put(config, :model, template.metadata[:model]),
+              else: config
+
           if template.metadata[:use_orchid_tools],
             do: Map.put(config, :use_orchid_tools, true),
             else: config
@@ -301,7 +312,8 @@ defmodule OrchidWeb.AgentLive do
   end
 
   def handle_event("update_template_orchid_tools", %{"value" => _}, socket) do
-    {:noreply, assign(socket, :template_use_orchid_tools, !socket.assigns.template_use_orchid_tools)}
+    {:noreply,
+     assign(socket, :template_use_orchid_tools, !socket.assigns.template_use_orchid_tools)}
   end
 
   def handle_event("create_template", _params, socket) do
@@ -315,9 +327,10 @@ defmodule OrchidWeb.AgentLive do
         category: socket.assigns.template_category
       }
 
-      metadata = if socket.assigns.template_use_orchid_tools,
-        do: Map.put(metadata, :use_orchid_tools, true),
-        else: metadata
+      metadata =
+        if socket.assigns.template_use_orchid_tools,
+          do: Map.put(metadata, :use_orchid_tools, true),
+          else: metadata
 
       {:ok, template} =
         Orchid.Object.create(:agent_template, name, prompt, metadata: metadata)
@@ -441,11 +454,23 @@ defmodule OrchidWeb.AgentLive do
 
   # Goal events
   def handle_event("show_new_goal", _params, socket) do
-    {:noreply, assign(socket, creating_goal: true, new_goal_name: "", new_goal_description: "", new_goal_parent: nil)}
+    {:noreply,
+     assign(socket,
+       creating_goal: true,
+       new_goal_name: "",
+       new_goal_description: "",
+       new_goal_parent: nil
+     )}
   end
 
   def handle_event("cancel_new_goal", _params, socket) do
-    {:noreply, assign(socket, creating_goal: false, new_goal_name: "", new_goal_description: "", new_goal_parent: nil)}
+    {:noreply,
+     assign(socket,
+       creating_goal: false,
+       new_goal_name: "",
+       new_goal_description: "",
+       new_goal_parent: nil
+     )}
   end
 
   def handle_event("update_new_goal_name", %{"name" => name}, socket) do
@@ -470,12 +495,20 @@ defmodule OrchidWeb.AgentLive do
 
     if name != "" and project_id do
       description = String.trim(socket.assigns.new_goal_description)
-      Orchid.Goals.create(name, description, project_id, parent_goal_id: socket.assigns.new_goal_parent)
+
+      Orchid.Goals.create(name, description, project_id,
+        parent_goal_id: socket.assigns.new_goal_parent
+      )
 
       {:noreply,
        socket
        |> refresh_goals()
-       |> assign(creating_goal: false, new_goal_name: "", new_goal_description: "", new_goal_parent: nil)}
+       |> assign(
+         creating_goal: false,
+         new_goal_name: "",
+         new_goal_description: "",
+         new_goal_parent: nil
+       )}
     else
       {:noreply, socket}
     end
@@ -517,7 +550,11 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, assign(socket, :adding_dependency_to, nil)}
   end
 
-  def handle_event("add_dependency", %{"goal-id" => goal_id, "depends-on" => depends_on_id}, socket) do
+  def handle_event(
+        "add_dependency",
+        %{"goal-id" => goal_id, "depends-on" => depends_on_id},
+        socket
+      ) do
     Orchid.Goals.add_dependency(goal_id, depends_on_id)
 
     {:noreply,
@@ -526,7 +563,11 @@ defmodule OrchidWeb.AgentLive do
      |> assign(:adding_dependency_to, nil)}
   end
 
-  def handle_event("remove_dependency", %{"goal-id" => goal_id, "depends-on" => depends_on_id}, socket) do
+  def handle_event(
+        "remove_dependency",
+        %{"goal-id" => goal_id, "depends-on" => depends_on_id},
+        socket
+      ) do
     Orchid.Goals.remove_dependency(goal_id, depends_on_id)
     {:noreply, refresh_goals(socket)}
   end
@@ -544,7 +585,11 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, assign(socket, :assigning_goal, nil)}
   end
 
-  def handle_event("assign_goal_to_agent", %{"goal-id" => goal_id, "agent-id" => agent_id}, socket) do
+  def handle_event(
+        "assign_goal_to_agent",
+        %{"goal-id" => goal_id, "agent-id" => agent_id},
+        socket
+      ) do
     Orchid.Goals.assign_to_agent(goal_id, agent_id)
 
     {:noreply,
@@ -579,7 +624,9 @@ defmodule OrchidWeb.AgentLive do
   def handle_event("reset_sandbox", _params, socket) do
     # Legacy: reset sandbox from agent chat view using current project
     case socket.assigns.current_project do
-      nil -> {:noreply, socket}
+      nil ->
+        {:noreply, socket}
+
       project_id ->
         Orchid.Sandbox.reset(project_id)
         {:noreply, refresh_sandbox_statuses(socket)}
@@ -727,6 +774,7 @@ defmodule OrchidWeb.AgentLive do
             {:ok, state} ->
               socket
               |> assign(:agent_status, state.status)
+              |> assign(:agent_wait_status, wait_status_from_memory(state.memory))
               |> assign(:messages, format_messages(state.messages))
 
             _ ->
@@ -989,6 +1037,11 @@ defmodule OrchidWeb.AgentLive do
                   <% end %>
                 </div>
               <% end %>
+              <%= if @agent_wait_status && @agent_wait_status != "" do %>
+                <div style="background: #111b2e; border-bottom: 1px solid #30363d; padding: 0.4rem 1rem; font-size: 0.8rem; color: #58a6ff;">
+                  Waiting: <%= @agent_wait_status %>
+                </div>
+              <% end %>
               <%= if @show_system_prompt and @system_prompt do %>
                 <div style="background: #0d1117; border-bottom: 1px solid #30363d; padding: 0.75rem 1rem; max-height: 300px; overflow-y: auto; font-size: 0.8rem; color: #8b949e; white-space: pre-wrap; font-family: monospace; line-height: 1.5;"><%= @system_prompt %></div>
               <% end %>
@@ -1020,6 +1073,11 @@ defmodule OrchidWeb.AgentLive do
                     <% :error -> %>
                       <div class="message error">
                         <div style="white-space: pre-wrap;"><%= msg.content %></div>
+                      </div>
+                    <% :notification -> %>
+                      <div class="message" style="background: #111b2e; border: 1px solid #30363d; color: #58a6ff;">
+                        <div style="font-size: 0.75rem; margin-bottom: 0.25rem; color: #8b949e;">Notification</div>
+                        <div style="white-space: pre-wrap;"><%= format_content(msg.content) %></div>
                       </div>
                     <% _ -> %>
                       <div class="message">
@@ -1287,6 +1345,14 @@ defmodule OrchidWeb.AgentLive do
                                 phx-value-id={goal.id}
                               >×</button>
                             </div>
+                            <% outcome = goal_terminal_outcome(goal) %>
+                            <% summary = goal_summary(goal) %>
+                            <%= if outcome && summary != "" do %>
+                              <div style="margin-top: 0.4rem; margin-left: 1.75rem; font-size: 0.8rem; display: flex; gap: 0.4rem; align-items: flex-start;">
+                                <span style={"padding: 0.05rem 0.35rem; border-radius: 3px; font-size: 0.7rem; #{goal_outcome_style(outcome)}"}><%= goal_outcome_label(outcome) %></span>
+                                <span style="color: #8b949e; white-space: pre-wrap; word-break: break-word;"><%= summary %></span>
+                              </div>
+                            <% end %>
                             <%= if @expanded_goal == goal.id do %>
                               <div style="margin-top: 0.5rem; margin-left: 1.75rem; padding: 0.5rem; background: #161b22; border: 1px solid #21262d; border-radius: 4px; font-size: 0.8rem;">
                                 <%= if goal.content != "" do %>
@@ -1303,8 +1369,16 @@ defmodule OrchidWeb.AgentLive do
                                   <%= if goal.metadata[:agent_id] do %>
                                     <span>Agent: <span style="color: #58a6ff; font-family: monospace;"><%= short_agent_id(goal.metadata[:agent_id]) %></span></span>
                                   <% end %>
+                                  <%= if outcome do %>
+                                    <span>Outcome: <span style="color: #8b949e;"><%= goal_outcome_label(outcome) %></span></span>
+                                  <% end %>
                                   <span>Created: <span style="color: #8b949e;"><%= Calendar.strftime(goal.created_at, "%Y-%m-%d %H:%M") %></span></span>
                                 </div>
+                                <%= if outcome && summary != "" do %>
+                                  <div style="margin-top: 0.5rem; color: #8b949e; white-space: pre-wrap; word-break: break-word;">
+                                    <strong style="color: #c9d1d9;">Summary:</strong> <%= summary %>
+                                  </div>
+                                <% end %>
                               </div>
                             <% end %>
                             <%= if (goal.metadata[:depends_on] || []) != [] do %>
@@ -1394,6 +1468,11 @@ defmodule OrchidWeb.AgentLive do
                   <%= if agent.goal do %>
                     <div style="color: #c9d1d9; font-size: 0.85rem; margin-top: 0.25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title={agent.goal}><%= agent.goal %></div>
                   <% end %>
+                  <%= if agent.wait_status do %>
+                    <div style="color: #58a6ff; font-size: 0.8rem; margin-top: 0.25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title={agent.wait_status}>
+                      Waiting: <%= agent.wait_status %>
+                    </div>
+                  <% end %>
                   <%= if agent.project_id && !@current_project do %>
                     <div class="agent-project" style="margin-top: 0.25rem;">
                       <span class="project-badge"><%= get_project_name(@projects, agent.project_id) %></span>
@@ -1455,6 +1534,73 @@ defmodule OrchidWeb.AgentLive do
     end
   end
 
+  defp goal_terminal_outcome(goal) do
+    status = normalize_status(goal.metadata[:status])
+    outcome = normalize_outcome(goal.metadata[:task_outcome])
+
+    cond do
+      outcome in [:failure, :blocked] -> outcome
+      status == :completed -> :success
+      outcome == :success -> :success
+      true -> nil
+    end
+  end
+
+  defp goal_summary(goal) do
+    outcome = normalize_outcome(goal.metadata[:task_outcome])
+
+    first_nonempty([
+      if(outcome in [:failure, :blocked], do: goal.metadata[:last_error], else: nil),
+      goal.metadata[:completion_summary],
+      goal.metadata[:report],
+      if(outcome in [:failure, :blocked], do: goal.metadata[:last_error], else: nil)
+    ])
+  end
+
+  defp goal_outcome_label(:success), do: "Completed"
+  defp goal_outcome_label(:failure), do: "Failed"
+  defp goal_outcome_label(:blocked), do: "Blocked"
+  defp goal_outcome_label(_), do: "Done"
+
+  defp goal_outcome_style(:success), do: "background: #0e2a15; color: #7ee787;"
+  defp goal_outcome_style(:failure), do: "background: #3d1114; color: #f85149;"
+  defp goal_outcome_style(:blocked), do: "background: #2d2000; color: #d29922;"
+  defp goal_outcome_style(_), do: "background: #21262d; color: #8b949e;"
+
+  defp normalize_status(v) when is_atom(v), do: v
+
+  defp normalize_status(v) when is_binary(v) do
+    case String.downcase(v) do
+      "completed" -> :completed
+      "pending" -> :pending
+      _ -> nil
+    end
+  end
+
+  defp normalize_status(_), do: nil
+
+  defp normalize_outcome(v) when is_atom(v), do: v
+
+  defp normalize_outcome(v) when is_binary(v) do
+    case String.downcase(v) do
+      "success" -> :success
+      "failure" -> :failure
+      "blocked" -> :blocked
+      "in_progress" -> :in_progress
+      _ -> nil
+    end
+  end
+
+  defp normalize_outcome(_), do: nil
+
+  defp first_nonempty(values) do
+    values
+    |> Enum.find("", fn v ->
+      is_binary(v) and String.trim(v) != ""
+    end)
+    |> String.trim()
+  end
+
   defp format_content(content) when is_binary(content), do: content
   defp format_content(content), do: inspect(content)
 
@@ -1481,7 +1627,9 @@ defmodule OrchidWeb.AgentLive do
         {:ok, state} ->
           template_name =
             case state.config[:template_id] do
-              nil -> nil
+              nil ->
+                nil
+
               tid ->
                 case Orchid.Object.get(tid) do
                   {:ok, obj} -> obj.name
@@ -1491,7 +1639,9 @@ defmodule OrchidWeb.AgentLive do
 
           goal_name =
             case state.project_id do
-              nil -> nil
+              nil ->
+                nil
+
               pid ->
                 Orchid.Object.list_goals_for_project(pid)
                 |> Enum.find(fn g -> g.metadata[:agent_id] == agent_id end)
@@ -1502,13 +1652,38 @@ defmodule OrchidWeb.AgentLive do
             end
 
           status = state.status
+          wait_status = wait_status_from_memory(state.memory)
 
-          %{id: agent_id, project_id: state.project_id, template: template_name, goal: goal_name, status: status}
+          %{
+            id: agent_id,
+            project_id: state.project_id,
+            template: template_name,
+            goal: goal_name,
+            status: status,
+            wait_status: wait_status
+          }
+
         _ ->
-          %{id: agent_id, project_id: nil, template: nil, goal: nil, status: :unknown}
+          %{
+            id: agent_id,
+            project_id: nil,
+            template: nil,
+            goal: nil,
+            status: :unknown,
+            wait_status: nil
+          }
       end
     end)
   end
+
+  defp wait_status_from_memory(memory) when is_map(memory) do
+    case Map.get(memory, "wait_status") || Map.get(memory, :wait_status) do
+      msg when is_binary(msg) and msg != "" -> msg
+      _ -> nil
+    end
+  end
+
+  defp wait_status_from_memory(_), do: nil
 
   defp refresh_sandbox_statuses(socket) do
     case socket.assigns.current_project do
@@ -1530,7 +1705,10 @@ defmodule OrchidWeb.AgentLive do
   defp agent_status_label({:executing_tool, names}), do: "Tool: #{names}"
   defp agent_status_label(:thinking), do: "Thinking..."
   defp agent_status_label(:streaming), do: "Streaming..."
-  defp agent_status_label(status) when is_atom(status), do: status |> Atom.to_string() |> String.capitalize()
+
+  defp agent_status_label(status) when is_atom(status),
+    do: status |> Atom.to_string() |> String.capitalize()
+
   defp agent_status_label(_), do: "Active"
 
   defp agent_status_style(:idle), do: "background: #21262d; color: #8b949e;"
@@ -1605,7 +1783,10 @@ defmodule OrchidWeb.AgentLive do
             name: goal.name,
             status: goal.metadata[:status],
             agent_id: goal.metadata[:agent_id],
-            x: x, y: y, w: node_w, h: node_h
+            x: x,
+            y: y,
+            w: node_w,
+            h: node_h
           }
 
           {n_acc ++ [node], Map.put(p_acc, goal.id, {x, y})}
@@ -1638,10 +1819,11 @@ defmodule OrchidWeb.AgentLive do
 
   defp compute_depths(goals, id_set) do
     # BFS from roots, tracking max depth
-    initial = Map.new(goals, fn g ->
-      deps = (g.metadata[:depends_on] || []) |> Enum.filter(&(&1 in id_set))
-      {g.id, deps}
-    end)
+    initial =
+      Map.new(goals, fn g ->
+        deps = (g.metadata[:depends_on] || []) |> Enum.filter(&(&1 in id_set))
+        {g.id, deps}
+      end)
 
     roots = for g <- goals, (initial[g.id] || []) == [], do: g.id
     do_compute_depths(roots, initial, %{}, 0)
@@ -1650,10 +1832,11 @@ defmodule OrchidWeb.AgentLive do
   defp do_compute_depths([], _deps_map, depths, _layer), do: depths
 
   defp do_compute_depths(current, deps_map, depths, layer) do
-    depths = Enum.reduce(current, depths, fn id, acc ->
-      # Use max depth if already visited at a shallower layer
-      Map.update(acc, id, layer, &max(&1, layer))
-    end)
+    depths =
+      Enum.reduce(current, depths, fn id, acc ->
+        # Use max depth if already visited at a shallower layer
+        Map.update(acc, id, layer, &max(&1, layer))
+      end)
 
     # Find all goals whose deps are now fully resolved
     all_ids = Map.keys(deps_map)

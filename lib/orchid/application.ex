@@ -14,6 +14,8 @@ defmodule Orchid.Application do
       {Registry, keys: :unique, name: Orchid.Registry},
       # DynamicSupervisor for agent processes
       {DynamicSupervisor, strategy: :one_for_one, name: Orchid.AgentSupervisor},
+      # Serialized completion-review queue to avoid reviewer call floods
+      Orchid.GoalReviewQueue,
       # PubSub for Phoenix
       {Phoenix.PubSub, name: Orchid.PubSub},
       # Phoenix endpoint

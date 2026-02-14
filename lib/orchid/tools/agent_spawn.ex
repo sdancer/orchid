@@ -10,7 +10,8 @@ defmodule Orchid.Tools.AgentSpawn do
 
   @impl true
   def description,
-    do: "Spawn a new agent from a template and optionally assign it a goal. Returns the new agent ID."
+    do:
+      "Spawn a new agent from a template and optionally assign it a goal. Returns the new agent ID."
 
   @impl true
   def parameters do
@@ -52,18 +53,21 @@ defmodule Orchid.Tools.AgentSpawn do
           provider: template.metadata[:provider] || :cli,
           system_prompt: template.content,
           template_id: template.id,
-          project_id: project_id
+          project_id: project_id,
+          creator_agent_id: state.id
         }
 
         # Only set model if template specifies one — providers have their own defaults
-        config = if template.metadata[:model],
-          do: Map.put(config, :model, template.metadata[:model]),
-          else: config
+        config =
+          if template.metadata[:model],
+            do: Map.put(config, :model, template.metadata[:model]),
+            else: config
 
         # Pass through extra template metadata flags
-        config = if template.metadata[:use_orchid_tools],
-          do: Map.put(config, :use_orchid_tools, true),
-          else: config
+        config =
+          if template.metadata[:use_orchid_tools],
+            do: Map.put(config, :use_orchid_tools, true),
+            else: config
 
         case Orchid.Agent.create(config) do
           {:ok, agent_id} ->

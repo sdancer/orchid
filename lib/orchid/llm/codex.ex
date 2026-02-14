@@ -68,41 +68,103 @@ defmodule Orchid.LLM.Codex do
     end
   end
 
-  # Parse JSONL output from `codex exec --json`
-  # Extract agent_message items and command_execution results
+  # Parse JSONL output from `codex exec --json`.
+  # Codex event shapes evolve; keep extraction tolerant so callers don't fail on format drift.
   defp parse_jsonl(raw) do
-    raw
-    |> String.split("\n")
-    |> Enum.reduce([], fn line, acc ->
-      line = String.trim(line)
-      case Jason.decode(line) do
-        {:ok, %{"type" => "item.completed", "item" => item}} ->
-          case item do
-            %{"type" => "agent_message", "text" => text} ->
-              acc ++ [{:message, text}]
+    {entries, passthrough_lines} =
+      raw
+      |> String.split("\n")
+      |> Enum.reduce({[], []}, fn line, {acc, passthrough} ->
+        line = String.trim(line)
 
-            %{"type" => "command_execution", "command" => cmd, "aggregated_output" => output, "exit_code" => code} ->
-              summary = "$ #{cmd}\n#{output}" <>
-                if(code != 0, do: "\n(exit code: #{code})", else: "")
-              acc ++ [{:command, summary}]
+        case Jason.decode(line) do
+          {:ok, event} when is_map(event) ->
+            {acc ++ extract_entries_from_event(event), passthrough}
 
-            _ ->
-              acc
-          end
+          _ ->
+            if line == "", do: {acc, passthrough}, else: {acc, passthrough ++ [line]}
+        end
+      end)
 
-        {:ok, %{"type" => "error", "message" => msg}} ->
-          acc ++ [{:message, "Error: #{msg}"}]
+    formatted =
+      entries
+      |> Enum.map(fn
+        {:message, text} -> text
+        {:command, text} -> "```\n#{text}\n```"
+      end)
+      |> Enum.join("\n\n")
 
-        _ ->
-          acc
-      end
-    end)
-    |> Enum.map(fn
-      {:message, text} -> text
-      {:command, text} -> "```\n#{text}\n```"
-    end)
-    |> Enum.join("\n\n")
+    if formatted == "" and passthrough_lines != [] do
+      Enum.join(passthrough_lines, "\n")
+    else
+      formatted
+    end
   end
+
+  defp extract_entries_from_event(%{"type" => "item.completed", "item" => item}) when is_map(item) do
+    extract_entries_from_item(item)
+  end
+
+  defp extract_entries_from_event(%{"type" => "response.output_text.delta", "delta" => delta})
+       when is_binary(delta) and delta != "" do
+    [{:message, delta}]
+  end
+
+  defp extract_entries_from_event(%{"type" => "response.output_text.done", "text" => text})
+       when is_binary(text) and text != "" do
+    [{:message, text}]
+  end
+
+  defp extract_entries_from_event(%{"type" => "response.completed", "response" => %{"output" => output}})
+       when is_list(output) do
+    Enum.flat_map(output, &extract_entries_from_item/1)
+  end
+
+  defp extract_entries_from_event(%{"type" => "error", "message" => msg}) when is_binary(msg) do
+    [{:message, "Error: #{msg}"}]
+  end
+
+  defp extract_entries_from_event(_), do: []
+
+  defp extract_entries_from_item(%{"type" => type} = item)
+       when type in ["agent_message", "assistant_message", "message"] do
+    text =
+      case item do
+        %{"text" => t} when is_binary(t) -> t
+        %{"content" => content} -> content_to_text(content)
+        _ -> ""
+      end
+
+    if text == "", do: [], else: [{:message, text}]
+  end
+
+  defp extract_entries_from_item(%{"type" => "command_execution"} = item) do
+    cmd = item["command"] || item["cmd"] || "(command)"
+    output = item["aggregated_output"] || item["output"] || ""
+    code = item["exit_code"] || item["status_code"]
+
+    summary =
+      "$ #{cmd}\n#{output}" <>
+        if(is_integer(code) and code != 0, do: "\n(exit code: #{code})", else: "")
+
+    [{:command, summary}]
+  end
+
+  defp extract_entries_from_item(_), do: []
+
+  defp content_to_text(content) when is_binary(content), do: content
+
+  defp content_to_text(content) when is_list(content) do
+    content
+    |> Enum.map(fn
+      %{"text" => text} when is_binary(text) -> text
+      %{"type" => "output_text", "text" => text} when is_binary(text) -> text
+      _ -> ""
+    end)
+    |> Enum.join("")
+  end
+
+  defp content_to_text(_), do: ""
 
   defp build_prompt(context) do
     # Codex doesn't have a separate system prompt flag.
@@ -138,13 +200,27 @@ defmodule Orchid.LLM.Codex do
     args = case config[:project_id] do
       nil -> args
       project_id ->
-        workspace = Orchid.Project.files_path(project_id) |> Path.expand()
-        File.mkdir_p!(workspace)
+        workspace =
+          if config[:use_orchid_tools] do
+            Orchid.Project.files_path(project_id) |> Path.expand()
+          else
+            "/workspace"
+          end
+
+        if config[:use_orchid_tools], do: File.mkdir_p!(workspace)
         args ++ ["-C", workspace]
     end
 
-    # Sandbox mode — use full-auto (workspace-write + auto-approve)
-    args = args ++ ["--full-auto"]
+    # Execution policy:
+    # - Worker agents already run inside Podman sandbox containers. Disable Codex's nested sandbox
+    #   so shell commands use container networking/filesystem directly.
+    # - Orchestrators keep Codex full-auto behavior.
+    args =
+      if config[:project_id] && !config[:use_orchid_tools] do
+        args ++ ["--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
+      else
+        args ++ ["--full-auto"]
+      end
 
     # Orchestrators: disable shell tool, only use MCP tools
     args = if config[:use_orchid_tools] do
@@ -161,12 +237,21 @@ defmodule Orchid.LLM.Codex do
     codex_path = System.find_executable("codex") || "codex"
     escaped_args = Enum.map(args, &shell_escape/1)
 
-    if config[:use_orchid_tools] && config[:project_id] do
-      # Orchestrator: create temp CODEX_HOME with MCP config
-      codex_home = setup_orchestrator_home(config[:project_id], config[:agent_id])
-      "CODEX_HOME=#{shell_escape(codex_home)} #{codex_path} #{Enum.join(escaped_args, " ")} 2>&1"
-    else
-      "#{codex_path} #{Enum.join(escaped_args, " ")} 2>&1"
+    cond do
+      # Orchestrator: run on host with Orchid MCP tools
+      config[:use_orchid_tools] && config[:project_id] ->
+        codex_home = setup_orchestrator_home(config[:project_id], config[:agent_id])
+        "CODEX_HOME=#{shell_escape(codex_home)} #{codex_path} #{Enum.join(escaped_args, " ")} 2>&1"
+
+      # Worker agent: run inside sandbox container for isolation.
+      config[:project_id] ->
+        container = "orchid-project-#{config[:project_id]}"
+        inner_cmd = "cd /workspace && codex #{Enum.join(escaped_args, " ")}"
+        "podman exec #{container} sh -c #{shell_escape(inner_cmd)} 2>&1"
+
+      # No project: run on host
+      true ->
+        "#{codex_path} #{Enum.join(escaped_args, " ")} 2>&1"
     end
   end
 

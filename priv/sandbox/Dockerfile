@@ -7,8 +7,10 @@ RUN apt-get update -qq && \
       ripgrep \
       curl \
       ca-certificates \
+      nodejs \
       sudo \
     && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/nodejs /usr/local/bin/node \
     && useradd -m -s /bin/bash agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent
 

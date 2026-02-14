@@ -248,23 +248,119 @@ defmodule Orchid.Sandbox do
     mounts
   end
 
+  defp codex_mounts do
+    home = System.user_home!()
+    codex_home = System.get_env("CODEX_HOME") || Path.join(home, ".codex")
+    codex_bin_path = System.find_executable("codex")
+    codex_pkg_path = codex_package_path(codex_bin_path)
+
+    mounts = []
+    mounts =
+      if codex_pkg_path && File.dir?(codex_pkg_path),
+        do: mounts ++ ["-v", "#{codex_pkg_path}:/usr/local/lib/node_modules/@openai/codex:ro"],
+        else: mounts
+
+    mounts = if File.dir?(codex_home), do: mounts ++ ["-v", "#{codex_home}:/tmp/.codex-host:ro"], else: mounts
+    mounts
+  end
+
+  defp codex_package_path(nil), do: nil
+
+  defp codex_package_path(codex_bin_path) do
+    case File.read_link(codex_bin_path) do
+      {:ok, target} ->
+        target
+        |> Path.expand(Path.dirname(codex_bin_path))
+        |> Path.dirname()
+        |> Path.dirname()
+
+      _ ->
+        case System.cmd("sh", ["-c", "readlink -f #{escape(codex_bin_path)}"], stderr_to_stdout: true) do
+          {resolved, 0} ->
+            resolved
+            |> String.trim()
+            |> Path.dirname()
+            |> Path.dirname()
+
+          _ ->
+            nil
+        end
+    end
+  end
+
   defp start_container(state) do
-    case try_overlay_container(state) do
+    # Prefer the stable bind-mount fallback. fuse-overlayfs mode has shown
+    # cross-device-link write failures for normal mkdir/touch operations.
+    case try_fallback_container(state) do
       {:ok, new_state} ->
-        Logger.info("Sandbox project-#{state.project_id}: overlay container started")
+        Logger.info("Sandbox project-#{state.project_id}: fallback container started (union mode)")
         new_state
 
       {:error, reason} ->
-        Logger.warning("Sandbox project-#{state.project_id}: overlay failed (#{reason}), trying fallback")
-        case try_fallback_container(state) do
+        Logger.warning("Sandbox project-#{state.project_id}: fallback failed (#{reason}), trying overlay")
+        case try_overlay_container(state) do
           {:ok, new_state} ->
-            Logger.info("Sandbox project-#{state.project_id}: fallback container started (union mode)")
+            Logger.info("Sandbox project-#{state.project_id}: overlay container started")
             new_state
 
           {:error, reason2} ->
             Logger.error("Sandbox project-#{state.project_id}: all container methods failed: #{reason2}")
             %{state | status: :error, overlay_method: :union}
         end
+    end
+  end
+
+  defp dns_args do
+    nameservers =
+      ["/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"]
+      |> Enum.find_value([], &read_nameservers/1)
+      |> Enum.reject(&(&1 in ["127.0.0.53", "127.0.0.1", "::1"]))
+      |> Enum.filter(&ipv4?/1)
+      |> Enum.uniq()
+      |> Enum.take(3)
+
+    nameservers =
+      if nameservers == [] do
+        # Conservative public fallback when host resolver info is unavailable.
+        ["1.1.1.1", "8.8.8.8"]
+      else
+        nameservers
+      end
+
+    Enum.flat_map(nameservers, fn ns -> ["--dns", ns] end)
+  end
+
+  defp read_nameservers(path) do
+    if File.exists?(path) do
+      path
+      |> File.read!()
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.filter(&String.starts_with?(&1, "nameserver "))
+      |> Enum.map(fn line ->
+        line |> String.replace_prefix("nameserver ", "") |> String.trim()
+      end)
+      |> case do
+        [] -> nil
+        list -> list
+      end
+    else
+      nil
+    end
+  end
+
+  defp ipv4?(ip) do
+    case String.split(ip, ".", parts: 4) do
+      [a, b, c, d] ->
+        Enum.all?([a, b, c, d], fn part ->
+          case Integer.parse(part) do
+            {n, ""} -> n >= 0 and n <= 255
+            _ -> false
+          end
+        end)
+
+      _ ->
+        false
     end
   end
 
@@ -279,11 +375,13 @@ defmodule Orchid.Sandbox do
       "-v", "#{state.lower_path}:/workspace_lower:ro",
       "-v", "#{state.upper_path}:/workspace_upper",
       "-v", "#{state.work_path}:/workspace_work"
-    ] ++ claude_mounts() ++ [
+    ] ++ dns_args() ++ claude_mounts() ++ codex_mounts() ++ [
       state.image,
       "sh", "-c",
       "sudo mkdir -p /workspace && sudo fuse-overlayfs -o lowerdir=/workspace_lower,upperdir=/workspace_upper,workdir=/workspace_work /workspace && sudo chown agent:agent /workspace && " <>
+      "if [ -d /usr/local/lib/node_modules/@openai/codex ]; then sudo ln -sf /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex; fi && " <>
       "if [ -d /tmp/.claude-host ]; then mkdir -p /home/agent/.claude && sudo cp /tmp/.claude-host/.credentials.json /tmp/.claude-host/settings.json /home/agent/.claude/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.claude; fi && " <>
+      "if [ -d /tmp/.codex-host ]; then mkdir -p /home/agent/.codex && sudo cp -r /tmp/.codex-host/* /home/agent/.codex/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.codex; fi && " <>
       "exec sleep infinity"
     ]
 
@@ -310,10 +408,15 @@ defmodule Orchid.Sandbox do
       "--name", state.container_name,
       "-v", "#{state.lower_path}:/workspace_lower:ro",
       "-v", "#{state.upper_path}:/workspace:rw"
-    ] ++ claude_mounts() ++ [
+    ] ++ dns_args() ++ claude_mounts() ++ codex_mounts() ++ [
       state.image,
       "sh", "-c",
+      "mkdir -p /workspace && sudo chown -R agent:agent /workspace && " <>
+      # Seed fallback workspace with lower-layer snapshot so workers can read project files.
+      "if [ -d /workspace_lower ]; then cp -a /workspace_lower/. /workspace/ 2>/dev/null || true; fi && " <>
+      "if [ -d /usr/local/lib/node_modules/@openai/codex ]; then sudo ln -sf /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex; fi && " <>
       "if [ -d /tmp/.claude-host ]; then mkdir -p /home/agent/.claude && sudo cp /tmp/.claude-host/.credentials.json /tmp/.claude-host/settings.json /home/agent/.claude/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.claude; fi && " <>
+      "if [ -d /tmp/.codex-host ]; then mkdir -p /home/agent/.codex && sudo cp -r /tmp/.codex-host/* /home/agent/.codex/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.codex; fi && " <>
       "exec sleep infinity"
     ]
 
