@@ -407,26 +407,40 @@ defmodule Orchid.Agent do
     publish_state(new_state)
     Store.put_agent_state(new_state.id, new_state)
 
+    assigned_pending = assigned_pending_goals(new_state)
+    tool_delta = tool_history_delta(state, new_state)
     # Auto-complete assigned goals for worker CLI/Codex agents (not orchestrators, not on error).
     # If the worker already used task_report in this turn, skip reviewer auto-finalization.
-    if new_state.config[:provider] in [:cli, :codex] &&
-         new_state.project_id &&
-         !new_state.config[:use_orchid_tools] &&
-         match?({:ok, _}, result) do
-      response =
-        case result do
-          {:ok, content} -> content
-          other -> other
+    impl_retry_triggered =
+      if new_state.config[:provider] in [:cli, :codex] &&
+           new_state.project_id &&
+           !new_state.config[:use_orchid_tools] &&
+           match?({:ok, _}, result) do
+        response =
+          case result do
+            {:ok, content} -> content
+            other -> other
+          end
+
+        impl_retry_triggered =
+          if task_report_used_in_turn?(state, new_state) do
+            false
+          else
+            maybe_retry_for_missing_impl_evidence(new_state, assigned_pending, tool_delta)
+          end
+
+        unless task_report_used_in_turn?(state, new_state) or impl_retry_triggered do
+          Orchid.GoalReviewQueue.enqueue(
+            new_state.id,
+            new_state.project_id,
+            normalize_report(response)
+          )
         end
 
-      unless task_report_used_in_turn?(state, new_state) do
-        Orchid.GoalReviewQueue.enqueue(
-          new_state.id,
-          new_state.project_id,
-          normalize_report(response)
-        )
+        impl_retry_triggered
+      else
+        false
       end
-    end
 
     # Worker agents: always stop when done (success or failure).
     # GoalWatcher can clear/reassign orphaned pending goals if any remain.
@@ -443,8 +457,17 @@ defmodule Orchid.Agent do
           {:stop, {:worker_error, truncate(inspect(reason), 800)}, new_state}
 
         {:ok, _} ->
-          Logger.info("Agent #{new_state.id} (#{agent_tag}) stopping after successful run")
-          {:stop, :normal, new_state}
+          cond do
+            impl_retry_triggered ->
+              {:noreply, new_state}
+
+            assigned_pending != [] ->
+              {:noreply, new_state}
+
+            true ->
+              Logger.info("Agent #{new_state.id} (#{agent_tag}) stopping after successful run")
+              {:stop, :normal, new_state}
+          end
       end
     else
       {:noreply, new_state}
@@ -557,6 +580,8 @@ defmodule Orchid.Agent do
             reviewed_by: "haiku"
           })
 
+          maybe_retry_after_incomplete_review(agent_id, goal, summary, error)
+
         {:error, reason} ->
           Logger.error(
             "Agent #{agent_id}: completion review failed for \"#{goal.name}\" [#{goal.id}]: #{inspect(reason)}"
@@ -580,6 +605,133 @@ defmodule Orchid.Agent do
     |> Enum.drop(old_len)
     |> Enum.any?(fn tr -> tr.tool == "task_report" end)
   end
+
+  defp assigned_pending_goals(state) do
+    Orchid.Object.list_goals_for_project(state.project_id)
+    |> Enum.filter(fn g ->
+      g.metadata[:agent_id] == state.id and g.metadata[:status] != :completed
+    end)
+  end
+
+  defp tool_history_delta(old_state, new_state) do
+    old_len = length(old_state.tool_history)
+    Enum.drop(new_state.tool_history, old_len)
+  end
+
+  defp maybe_retry_for_missing_impl_evidence(state, goals, tool_delta) do
+    target_goals =
+      Enum.filter(goals, fn g ->
+        implementation_goal?(g) and (g.metadata[:impl_enforcement_retry_count] || 0) < 1
+      end)
+
+    if target_goals != [] and not has_impl_evidence?(tool_delta) do
+      for goal <- target_goals do
+        current = goal.metadata[:impl_enforcement_retry_count] || 0
+
+        Orchid.Object.update_metadata(goal.id, %{
+          impl_enforcement_retry_count: current + 1,
+          completion_summary:
+            "In progress: response lacked required implementation evidence (file edits + build verification).",
+          last_error: "Implementation evidence missing; corrective retry triggered."
+        })
+      end
+
+      goal_names = Enum.map_join(target_goals, ", ", &"\"#{&1.name}\" [#{&1.id}]")
+
+      corrective =
+        """
+        Your last response did not include required implementation evidence for: #{goal_names}.
+
+        For implementation goals, do this in the SAME run:
+        1) Edit/create the required source files.
+        2) Run a build/verification command and capture result.
+        3) Report concrete file paths changed and command output.
+
+        Do not stop at analysis or document excerpts.
+        """
+        |> String.trim()
+
+      Task.start(fn -> Orchid.Agent.stream(state.id, corrective, fn _chunk -> :ok end) end)
+      true
+    else
+      false
+    end
+  end
+
+  defp maybe_retry_after_incomplete_review(agent_id, goal, summary, error) do
+    retry_count = goal.metadata[:auto_retry_count] || 0
+
+    if retry_count < 1 and agent_alive?(agent_id) do
+      Orchid.Object.update_metadata(goal.id, %{auto_retry_count: retry_count + 1})
+
+      corrective =
+        """
+        Reviewer marked your previous attempt incomplete for goal "#{goal.name}" [#{goal.id}].
+
+        Reviewer summary: #{summary}
+        #{if(error, do: "Reviewer error: #{error}", else: "Reviewer error: (none provided)")}
+
+        Retry now with concrete implementation:
+        - make the required source/code changes
+        - run build/verification commands
+        - include exact changed paths and command outputs
+        - if blocked, provide exact failing command and output
+        """
+        |> String.trim()
+
+      Task.start(fn -> Orchid.Agent.stream(agent_id, corrective, fn _chunk -> :ok end) end)
+    end
+  end
+
+  defp agent_alive?(agent_id) when is_binary(agent_id) do
+    case Registry.lookup(Orchid.Registry, agent_id) do
+      [{pid, _}] -> Process.alive?(pid)
+      [] -> false
+    end
+  end
+
+  defp agent_alive?(_), do: false
+
+  defp implementation_goal?(goal) do
+    text = "#{goal.name}\n#{goal.content || ""}" |> String.downcase()
+
+    String.contains?(text, "implement") or
+      String.contains?(text, "create") or
+      String.contains?(text, "add ") or
+      String.contains?(text, "refactor") or
+      String.contains?(text, "cmakelists") or
+      Regex.match?(~r/src\/|\.c\b|\.h\b|\.cpp\b|\.rs\b|\.go\b|\.ex\b|\.js\b/, text)
+  end
+
+  defp has_impl_evidence?(tool_delta) do
+    has_edit =
+      Enum.any?(tool_delta, fn tr ->
+        tr.tool == "edit"
+      end)
+
+    has_build =
+      Enum.any?(tool_delta, fn tr ->
+        tr.tool == "shell" and shell_build_command?(tr.args)
+      end)
+
+    has_edit and has_build
+  end
+
+  defp shell_build_command?(%{"command" => cmd}) when is_binary(cmd) do
+    lc = String.downcase(cmd)
+
+    String.contains?(lc, "cmake") or
+      String.contains?(lc, "ninja") or
+      String.contains?(lc, "make") or
+      String.contains?(lc, "mix compile") or
+      String.contains?(lc, "mix test") or
+      String.contains?(lc, "cargo build") or
+      String.contains?(lc, "go test") or
+      String.contains?(lc, "pytest") or
+      String.contains?(lc, "npm run build")
+  end
+
+  defp shell_build_command?(_), do: false
 
   defp annotate_assigned_goals_error(state, reason) do
     goals = Orchid.Object.list_goals_for_project(state.project_id)

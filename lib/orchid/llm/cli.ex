@@ -18,6 +18,10 @@ defmodule Orchid.LLM.CLI do
   Send a chat request via Claude CLI.
   """
   def chat(config, context) do
+    do_chat(config, context, false)
+  end
+
+  defp do_chat(config, context, retried?) do
     prompt = get_prompt(context)
     args = build_args(config, context, prompt)
 
@@ -44,8 +48,21 @@ defmodule Orchid.LLM.CLI do
 
       {:ok, content} ->
         if String.starts_with?(content, "Error:") or String.starts_with?(content, "error:") do
-          Logger.error("CLI error: #{String.slice(content, 0, 500)}")
-          {:error, {:api_error, content}}
+          if not retried? and oauth_token_expired_error?(content) do
+            Logger.warning("CLI auth expired; forcing token refresh and retrying once")
+
+            case Orchid.LLM.TokenRefresh.force_refresh() do
+              {:ok, _} ->
+                do_chat(config, context, true)
+
+              {:error, reason} ->
+                Logger.error("CLI token refresh failed: #{inspect(reason)}")
+                {:error, {:refresh_failed, reason}}
+            end
+          else
+            Logger.error("CLI error: #{String.slice(content, 0, 500)}")
+            {:error, {:api_error, content}}
+          end
         else
           {:ok, %{content: content, tool_calls: nil}}
         end
@@ -133,18 +150,40 @@ defmodule Orchid.LLM.CLI do
   end
 
   defp get_prompt(context) do
-    # Get the last user message as the prompt
-    context.messages
-    |> Enum.reverse()
-    |> Enum.find(fn msg -> msg.role == :user end)
-    |> case do
-      nil -> ""
-      msg -> msg.content
+    # Prefer the last user message; never return empty for --print mode.
+    prompt =
+      context.messages
+      |> Enum.reverse()
+      |> Enum.find_value(fn msg ->
+        if msg.role == :user and is_binary(msg.content) do
+          content = String.trim(msg.content)
+          if content != "", do: content
+        end
+      end)
+
+    cond do
+      is_binary(prompt) and prompt != "" ->
+        prompt
+
+      true ->
+        context.messages
+        |> Enum.reverse()
+        |> Enum.find_value(fn msg ->
+          if is_binary(msg.content) do
+            content = String.trim(msg.content)
+            if content != "", do: content
+          end
+        end)
+        |> case do
+          nil -> "Continue based on system instructions and return a concise response."
+          content -> content
+        end
     end
   end
 
   defp build_args(config, context, prompt, opts \\ []) do
     streaming = Keyword.get(opts, :stream, false)
+    prompt = ensure_non_empty_prompt(prompt, context)
 
     # Start with --print flag (non-interactive mode)
     args = ["--print"]
@@ -204,14 +243,51 @@ defmodule Orchid.LLM.CLI do
           args
       end
 
-    # Prompt is a positional argument at the end
-    args ++ [prompt]
+    # Prompt is a positional argument at the end.
+    # Use `--` so prompt text is never parsed as a flag.
+    args ++ ["--", prompt]
   end
 
   defp model_flag(nil), do: []
   defp model_flag(:sonnet), do: ["--model", "sonnet"]
   defp model_flag(:haiku), do: ["--model", "haiku"]
   defp model_flag(:opus), do: ["--model", "opus"]
+  defp model_flag("opus-4.6"), do: ["--model", "opus"]
+  defp model_flag("claude-opus-4.6"), do: ["--model", "opus"]
   defp model_flag(model) when is_binary(model), do: ["--model", model]
   defp model_flag(_), do: []
+
+  defp oauth_token_expired_error?(content) when is_binary(content) do
+    lc = String.downcase(content)
+
+    String.contains?(lc, "oauth token has expired") or
+      String.contains?(lc, "\"authentication_error\"")
+  end
+
+  defp ensure_non_empty_prompt(prompt, context) when is_binary(prompt) do
+    trimmed = String.trim(prompt)
+
+    if trimmed != "" do
+      trimmed
+    else
+      fallback_prompt(context)
+    end
+  end
+
+  defp ensure_non_empty_prompt(_prompt, context), do: fallback_prompt(context)
+
+  defp fallback_prompt(context) do
+    context.messages
+    |> Enum.reverse()
+    |> Enum.find_value(fn msg ->
+      if is_binary(msg.content) do
+        content = String.trim(msg.content)
+        if content != "", do: content
+      end
+    end)
+    |> case do
+      nil -> "Continue based on system instructions and return a concise response."
+      content -> content
+    end
+  end
 end

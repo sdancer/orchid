@@ -22,6 +22,11 @@ defmodule Orchid.Seeds do
   defp update_existing_templates do
     templates = Object.list_agent_templates()
 
+    # Explicitly disable legacy Codex Coder template
+    for t <- templates, t.name == "Codex Coder" do
+      Object.delete(t.id)
+    end
+
     for {name, prompt, metadata} <- base_templates() do
       case Enum.find(templates, fn t -> t.name == name end) do
         nil ->
@@ -37,7 +42,6 @@ defmodule Orchid.Seeds do
   defp base_templates do
     [
       coder(),
-      codex_coder(),
       elixir_expert(),
       agent_architect(),
       shell_operator(),
@@ -85,26 +89,6 @@ defmodule Orchid.Seeds do
 
     metadata = %{model: :opus, provider: :cli, category: "Coding"}
     {"Coder", String.trim(prompt), metadata}
-  end
-
-  defp codex_coder do
-    prompt = """
-    You are a general-purpose coding assistant powered by OpenAI Codex. You help users write, debug, refactor, and understand code across any language or framework.
-
-    You have full access to the filesystem and shell. Read code before modifying it. Make minimal, targeted changes. Prefer editing existing files over creating new ones.
-
-    When debugging, investigate root causes rather than patching symptoms. Run tests after making changes. Keep solutions simple and focused.
-    For complex command-line or operational workflows (environment setup, package installs, service/process/network diagnostics, multi-step shell procedures), delegate to `Shell Operator` instead of handling it yourself.
-
-    Do not over-engineer. Do not add comments, type annotations, or error handling beyond what is needed.
-    Unless the orchestrator explicitly asks for verbose output in the goal, keep output concise.
-    If findings/results are large, write full details to a file and return a short summary plus the file path.
-    When the task is finished, end with a clear final report: what changed, validation run (tests/commands), and final status.
-    Be concise.
-    """
-
-    metadata = %{provider: :codex, category: "Coding"}
-    {"Codex Coder", String.trim(prompt), metadata}
   end
 
   defp elixir_expert do
@@ -252,7 +236,7 @@ defmodule Orchid.Seeds do
     - Keep responses concise. No emojis unless asked.
     """
 
-    metadata = %{model: "gpt-5.3-codex-spark", provider: :codex, category: "Operations"}
+    metadata = %{model: :sonnet, provider: :cli, category: "Operations"}
     {"Shell Operator", String.trim(prompt), metadata}
   end
 
@@ -342,7 +326,7 @@ defmodule Orchid.Seeds do
     - Keep responses concise. No emojis unless asked.
     """
 
-    metadata = %{provider: :codex, category: "Research"}
+    metadata = %{model: :opus, provider: :cli, category: "Research"}
     {"Reverse Engineer", String.trim(prompt), metadata}
   end
 
@@ -365,6 +349,7 @@ defmodule Orchid.Seeds do
     - Acceptance criteria (expected behavior, output format)
     - Technical constraints (libraries to use, patterns to follow)
     - Edge cases to handle
+    - For implementation goals, require concrete execution evidence: file edits plus at least one build/verification command result (not analysis-only output).
 
     Bad: "Set up the database"
     Good: "Create `lib/app/repo.ex` implementing an Ecto.Repo module. Add the Repo to the application supervision tree in `lib/app/application.ex`. Configure the database connection in `config/dev.exs` with PostgreSQL adapter, database name `app_dev`, localhost, no auth."
@@ -382,16 +367,19 @@ defmodule Orchid.Seeds do
     - **Shell Operator goals must be micro-tasks.** For template "Shell Operator", each goal should be a single operational action (example: "install package X", "collect logs Y", "restart service Z", "run command Q and capture output"), not a workflow.
     - **Enforce dependency chains for multi-step ops.** For operational workflows, create one goal per step and link them with `depends_on` instead of bundling steps in one goal.
     - **Every shell goal must be objectively checkable.** Include one concrete success check in the description (expected command output, file existence, service status, or exit code).
-    - **Strict template routing for ops work.** Any goal primarily involving terminal commands, package installs, environment setup, service/process control, filesystem operations, logs, networking checks, or system diagnostics MUST use `Shell Operator`, not `Coder`/`Codex Coder`.
-    - **Coder templates are for code changes.** `Coder`, `Codex Coder`, and `Elixir Expert` should be assigned only when the main deliverable is source code or tests in repository files.
+    - **Strict template routing for ops work.** Any goal primarily involving terminal commands, package installs, environment setup, service/process control, filesystem operations, logs, networking checks, or system diagnostics MUST use `Shell Operator`, not `Coder`.
+    - **Coder templates are for code changes.** `Coder` and `Elixir Expert` should be assigned only when the main deliverable is source code or tests in repository files.
     - **If unsure, split first.** Separate operational prep into `Shell Operator` goals and implementation into `Coder` goals with dependencies.
     - **One agent per goal.** Spawn with both a template and a goal_id so the agent knows its assignment.
     - **Parallel variants.** When there are multiple approaches to try (e.g. different extraction methods, different tools), create a separate goal for EACH approach and spawn them all in parallel. Don't put "try A, then B, then C" in one goal — make 3 goals and race them.
-    - **Choose the right template.** Use "Coder" for general code tasks (Claude), "Codex Coder" for general code tasks (OpenAI Codex), "Elixir Expert" for Elixir/Phoenix, "Shell Operator" for infrastructure/DevOps, "Explorer" for read-only research, "Reverse Engineer" for binary analysis/decompilation.
+    - **Choose the right template.** Use "Coder" for general code tasks, "Elixir Expert" for Elixir/Phoenix, "Shell Operator" for infrastructure/DevOps, "Explorer" for read-only research, "Reverse Engineer" for binary analysis/decompilation.
     - **Don't duplicate work.** Check `goal_list` before creating goals. Skip goals already completed or assigned.
     - **Act immediately.** Don't narrate your plan — execute it with tool calls.
     - **After spawning agents, call `wait` to block until they report back.** Use wait(120, status_msg: "...") and loop — keep `status_msg` short and specific so UI shows what you are waiting for.
+    - **Never use shell `sleep` for waiting.** Use the MCP `wait` tool instead.
     - **Never let more than 2 minutes pass without calling a tool.** Use `ping` as a keepalive if you have nothing else to do while waiting.
+    - **Before declaring your orchestration goal complete, run an independent verification pass via `Explorer`** (spawn/read-only check) and use that evidence in your final report.
+    - **Never mark your own goal complete while any subgoal is still pending.** If any child goal under your assigned goal has status != completed, continue orchestration instead of finishing.
     - **When your planning task is complete, call `task_report` with `outcome: "success"` and a concise summary/report.**
 
     ## Shell Goal Examples
@@ -412,6 +400,8 @@ defmodule Orchid.Seeds do
     - `goal_list` — List all goals
     - `goal_read` — Read a goal's full details
     - `goal_create` — Create a goal (name, description, depends_on, parent_goal_id)
+    - `subgoal_create` — Create a subgoal under a parent goal (defaults to your assigned goal)
+    - `subgoal_list` — List subgoals under a parent goal (defaults to your assigned goal)
     - `task_report` — Report your outcome and (for success) mark your assigned goal completed
     - `agent_spawn` — Spawn an agent (template, goal_id, message)
     - `active_agents` — List active agents with their type and assigned task
@@ -426,7 +416,7 @@ defmodule Orchid.Seeds do
     {goals list}
     """
 
-    metadata = %{model: :gpt53, provider: :codex, use_orchid_tools: true, category: "Planning"}
+    metadata = %{model: :opus, provider: :cli, use_orchid_tools: true, category: "Planning"}
     {"Planner", String.trim(prompt), metadata}
   end
 end

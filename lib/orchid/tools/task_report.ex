@@ -52,6 +52,7 @@ defmodule Orchid.Tools.TaskReport do
   def execute(args, %{agent_state: state}) do
     with {:ok, goal} <- resolve_target_goal(args["goal_id"], state),
          :ok <- validate_args(args),
+         :ok <- validate_subgoals_complete(goal, state.project_id, args),
          {:ok, _} <- persist_report(goal, args) do
       {:ok, "Reported #{args["outcome"]} for goal \"#{goal.name}\" [#{goal.id}]"}
     end
@@ -69,6 +70,7 @@ defmodule Orchid.Tools.TaskReport do
       cond do
         is_binary(goal_ref) and goal_ref != "" ->
           id = GoalHelpers.resolve_goal_ref(goal_ref, project_id) || goal_ref
+
           case Object.get(id) do
             {:ok, %{type: :goal} = g} -> g
             _ -> nil
@@ -104,7 +106,8 @@ defmodule Orchid.Tools.TaskReport do
     metadata = %{
       completion_summary: summary,
       report: report,
-      last_error: if(outcome in ["failure", "blocked"], do: nonempty(error_text, summary), else: nil),
+      last_error:
+        if(outcome in ["failure", "blocked"], do: nonempty(error_text, summary), else: nil),
       task_outcome: outcome,
       reported_by_tool: true,
       reported_at: DateTime.utc_now()
@@ -115,6 +118,28 @@ defmodule Orchid.Tools.TaskReport do
       {:ok, :reported}
     end
   end
+
+  defp validate_subgoals_complete(goal, project_id, %{"outcome" => "success"} = args) do
+    if Map.get(args, "mark_completed", true) do
+      goals = Object.list_goals_for_project(project_id)
+
+      pending_children =
+        Enum.filter(goals, fn g ->
+          g.metadata[:parent_goal_id] == goal.id and g.metadata[:status] != :completed
+        end)
+
+      if pending_children == [] do
+        :ok
+      else
+        names = Enum.map_join(pending_children, ", ", fn g -> "#{g.name} [#{g.id}]" end)
+        {:error, "Cannot mark goal completed while subgoals are pending: #{names}"}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp validate_subgoals_complete(_goal, _project_id, _args), do: :ok
 
   defp maybe_update_status(goal_id, %{"outcome" => "success"} = args) do
     if Map.get(args, "mark_completed", true) do

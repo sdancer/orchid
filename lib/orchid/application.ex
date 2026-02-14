@@ -16,6 +16,8 @@ defmodule Orchid.Application do
       {DynamicSupervisor, strategy: :one_for_one, name: Orchid.AgentSupervisor},
       # Serialized completion-review queue to avoid reviewer call floods
       Orchid.GoalReviewQueue,
+      # MCP call event stream for GUI attribution
+      Orchid.McpEvents,
       # PubSub for Phoenix
       {Phoenix.PubSub, name: Orchid.PubSub},
       # Phoenix endpoint

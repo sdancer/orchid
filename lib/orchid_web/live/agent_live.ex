@@ -31,6 +31,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:adding_dependency_to, nil)
       |> assign(:assigning_goal, nil)
       |> assign(:goals_view_mode, :list)
+      |> assign(:hide_completed_goals, false)
       |> assign(:templates, Orchid.Object.list_agent_templates())
       |> then(fn s ->
         templates = s.assigns.templates
@@ -50,6 +51,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:agent_wait_status, nil)
       |> assign(:system_prompt, nil)
       |> assign(:show_system_prompt, false)
+      |> assign(:mcp_calls, [])
 
     socket =
       if agent_id do
@@ -81,6 +83,7 @@ defmodule OrchidWeb.AgentLive do
       end
 
     if connected?(socket) do
+      Phoenix.PubSub.subscribe(Orchid.PubSub, "mcp_calls")
       Process.send_after(self(), :poll_agent_status, 2000)
     end
 
@@ -374,6 +377,7 @@ defmodule OrchidWeb.AgentLive do
      socket
      |> assign(:current_project, id)
      |> assign(:goals, Orchid.Goals.list_for_project(id))
+     |> assign(:mcp_calls, recent_mcp_calls(id, 40))
      |> refresh_sandbox_statuses()}
   end
 
@@ -381,7 +385,8 @@ defmodule OrchidWeb.AgentLive do
     {:noreply,
      socket
      |> assign(:current_project, nil)
-     |> assign(:goals, [])}
+     |> assign(:goals, [])
+     |> assign(:mcp_calls, recent_mcp_calls(nil, 40))}
   end
 
   def handle_event("show_new_project", _params, socket) do
@@ -577,6 +582,10 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, assign(socket, :goals_view_mode, mode)}
   end
 
+  def handle_event("toggle_hide_completed_goals", _params, socket) do
+    {:noreply, assign(socket, :hide_completed_goals, !socket.assigns.hide_completed_goals)}
+  end
+
   def handle_event("start_assign_goal", %{"id" => id}, socket) do
     {:noreply, assign(socket, :assigning_goal, id)}
   end
@@ -759,6 +768,21 @@ defmodule OrchidWeb.AgentLive do
           s
         end
       end)
+
+    {:noreply, socket}
+  end
+
+  def handle_info({:mcp_call, event}, socket) do
+    relevant =
+      is_nil(socket.assigns.current_project) or event.project_id == socket.assigns.current_project
+
+    socket =
+      if relevant do
+        calls = [event | socket.assigns.mcp_calls] |> Enum.take(40)
+        assign(socket, :mcp_calls, calls)
+      else
+        socket
+      end
 
     {:noreply, socket}
   end
@@ -1108,6 +1132,20 @@ defmodule OrchidWeb.AgentLive do
                   </div>
                 <% end %>
               </div>
+              <%= if @mcp_calls != [] do %>
+                <div style="border-top: 1px solid #30363d; background: #0b0f16; padding: 0.5rem 1rem; max-height: 180px; overflow-y: auto;">
+                  <div style="color: #8b949e; font-size: 0.75rem; margin-bottom: 0.35rem;">Recent MCP Calls</div>
+                  <%= for ev <- @mcp_calls do %>
+                    <div style="display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; margin-bottom: 0.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                      <span style="color: #8b949e; min-width: 56px;"><%= short_time(ev.inserted_at) %></span>
+                      <span style="color: #58a6ff; font-family: monospace; min-width: 74px;"><%= short_agent_id(ev.agent_id || "none") %></span>
+                      <span style="color: #c9d1d9; min-width: 90px;"><%= ev.tool %></span>
+                      <span style={"min-width: 46px; color: #{if ev.outcome == "ok", do: "#7ee787", else: "#f85149"};"}><%= ev.outcome %></span>
+                      <span style="color: #8b949e;"><%= if is_integer(ev.duration_ms), do: "#{ev.duration_ms}ms", else: "-" %></span>
+                    </div>
+                  <% end %>
+                </div>
+              <% end %>
               <form class="input-area" phx-submit="send_message" phx-change="update_input">
                 <textarea
                   rows="2"
@@ -1180,6 +1218,11 @@ defmodule OrchidWeb.AgentLive do
                           style="padding: 0.2rem 0.5rem; font-size: 0.75rem;"
                           phx-click="toggle_goals_view"
                         ><%= if @goals_view_mode == :list, do: "Graph", else: "List" %></button>
+                        <button
+                          class="btn btn-secondary btn-sm"
+                          style="padding: 0.2rem 0.5rem; font-size: 0.75rem;"
+                          phx-click="toggle_hide_completed_goals"
+                        ><%= if @hide_completed_goals, do: "Show Done", else: "Hide Done" %></button>
                       <% end %>
                       <%= if @goals != [] do %>
                         <button
@@ -1237,8 +1280,12 @@ defmodule OrchidWeb.AgentLive do
                   <%= if @goals == [] and not @creating_goal do %>
                     <p style="color: #8b949e; margin: 0;">No goals yet.</p>
                   <% else %>
+                    <% visible_goals = filter_visible_goals(@goals, @hide_completed_goals) %>
+                    <%= if visible_goals == [] do %>
+                      <p style="color: #8b949e; margin: 0;">No visible goals.</p>
+                    <% else %>
                     <%= if @goals_view_mode == :graph do %>
-                      <% graph = compute_goal_graph(@goals) %>
+                      <% graph = compute_goal_graph(visible_goals) %>
                       <div style="overflow-x: auto; margin-bottom: 1rem;">
                         <svg
                           width={graph.width}
@@ -1297,7 +1344,7 @@ defmodule OrchidWeb.AgentLive do
                       </div>
                     <% else %>
                       <div class="goals-list" style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
-                        <%= for goal <- topo_sort_goals(@goals) do %>
+                        <%= for goal <- topo_sort_goals(visible_goals) do %>
                           <div class="goal-item" style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.75rem;">
                             <div style="display: flex; align-items: center; gap: 0.5rem;">
                               <button
@@ -1440,6 +1487,7 @@ defmodule OrchidWeb.AgentLive do
                           </div>
                         <% end %>
                       </div>
+                    <% end %>
                     <% end %>
                   <% end %>
                 </div>
@@ -1737,11 +1785,30 @@ defmodule OrchidWeb.AgentLive do
     end)
   end
 
+  defp filter_visible_goals(goals, false), do: goals
+
+  defp filter_visible_goals(goals, true) do
+    Enum.filter(goals, fn goal -> goal.metadata[:status] != :completed end)
+  end
+
+  defp recent_mcp_calls(project_id, limit) do
+    try do
+      Orchid.McpEvents.list_recent(project_id, limit, 250)
+    rescue
+      _ -> []
+    catch
+      :exit, _ -> []
+    end
+  end
+
   defp short_agent_id(id) when is_binary(id) do
     String.slice(id, 0, 8)
   end
 
   defp short_agent_id(id), do: inspect(id)
+
+  defp short_time(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M:%S")
+  defp short_time(_), do: "--:--:--"
 
   defp compute_goal_graph(goals) do
     id_set = MapSet.new(goals, & &1.id)
