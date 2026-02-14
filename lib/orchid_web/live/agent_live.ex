@@ -54,10 +54,22 @@ defmodule OrchidWeb.AgentLive do
       if agent_id do
         case Orchid.Agent.get_state(agent_id, 2000) do
           {:ok, state} ->
+            template_info = get_template_info(state.config[:template_id])
+
             socket
             |> assign(:messages, format_messages(state.messages))
             |> assign(:agent_status, state.status)
             |> assign(:system_prompt, state.config[:system_prompt])
+            |> assign(:current_agent_template, template_info)
+            |> then(fn s ->
+              if state.project_id do
+                s
+                |> assign(:current_project, state.project_id)
+                |> assign(:goals, Orchid.Goals.list_for_project(state.project_id))
+              else
+                s
+              end
+            end)
 
           _ ->
             socket
@@ -99,6 +111,15 @@ defmodule OrchidWeb.AgentLive do
             |> assign(:current_agent_template, template_info)
             |> assign(:system_prompt, state.config[:system_prompt])
             |> assign(:show_system_prompt, false)
+            |> then(fn s ->
+              if state.project_id do
+                s
+                |> assign(:current_project, state.project_id)
+                |> assign(:goals, Orchid.Goals.list_for_project(state.project_id))
+              else
+                s
+              end
+            end)
 
           _ ->
             socket
