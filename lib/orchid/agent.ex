@@ -44,8 +44,6 @@ defmodule Orchid.Agent do
         %{
           # Uses OAuth tokens (subscription-based)
           provider: :oauth,
-          # Can be :sonnet, :haiku, :opus
-          model: :opus,
           system_prompt: default_system_prompt()
         },
         config

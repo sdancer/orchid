@@ -78,8 +78,12 @@ for project <- rpc.(Orchid.Object, :list_projects, []) || [] do
   rpc.(Orchid.Object, :delete, [project.id])
 end
 
-# Reseed templates
+# Delete and reseed templates (ensures latest seed config)
 IO.puts("\n=== Reseeding templates ===")
+for t <- rpc.(Orchid.Object, :list_agent_templates, []) || [] do
+  IO.puts("  deleting template: #{t.name}")
+  rpc.(Orchid.Object, :delete, [t.id])
+end
 result = rpc.(Orchid.Seeds, :seed_templates, [])
 IO.puts("  #{result}")
 

@@ -129,6 +129,7 @@ defmodule Orchid.LLM.Codex do
     # Model
     args = case config[:model] do
       nil -> args
+      :gpt53 -> args ++ ["-m", "gpt-5.3-codex"]
       model when is_atom(model) -> args ++ ["-m", to_string(model)]
       model when is_binary(model) -> args ++ ["-m", model]
     end
@@ -203,6 +204,13 @@ defmodule Orchid.LLM.Codex do
     home = Path.join(System.tmp_dir!(), "orchid-codex-#{:erlang.unique_integer([:positive])}")
     File.mkdir_p!(home)
     File.write!(Path.join(home, "config.toml"), config_toml)
+
+    # Copy auth credentials from the real CODEX_HOME
+    real_home = System.get_env("CODEX_HOME") || Path.expand("~/.codex")
+    auth_file = Path.join(real_home, "auth.json")
+    if File.exists?(auth_file) do
+      File.cp!(auth_file, Path.join(home, "auth.json"))
+    end
 
     Logger.info("Codex orchestrator CODEX_HOME: #{home}")
     home

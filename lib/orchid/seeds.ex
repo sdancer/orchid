@@ -377,7 +377,7 @@ defmodule Orchid.Seeds do
     {goals list}
     """
 
-    metadata = %{model: :opus, provider: :cli, use_orchid_tools: true, category: "Planning"}
+    metadata = %{model: :gpt53, provider: :codex, use_orchid_tools: true, category: "Planning"}
     {"Planner", String.trim(prompt), metadata}
   end
 end

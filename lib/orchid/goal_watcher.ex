@@ -217,12 +217,15 @@ defmodule Orchid.GoalWatcher do
         end
 
         config = %{
-          model: planner.metadata[:model] || :opus,
           provider: planner.metadata[:provider] || :cli,
           system_prompt: system_prompt,
           template_id: planner.id,
           project_id: project.id
         }
+
+        config = if planner.metadata[:model],
+          do: Map.put(config, :model, planner.metadata[:model]),
+          else: config
 
         config = if planner.metadata[:use_orchid_tools],
           do: Map.put(config, :use_orchid_tools, true),
