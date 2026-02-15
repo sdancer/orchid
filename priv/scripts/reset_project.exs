@@ -87,6 +87,11 @@ end
 result = rpc.(Orchid.Seeds, :seed_templates, [])
 IO.puts("  #{result}")
 
+# Reload local facts file after reset/startup (API keys etc.)
+IO.puts("\n=== Seeding local facts file ===")
+facts_result = rpc.(Orchid.Facts, :seed_from_local_file, [])
+IO.puts("  #{inspect(facts_result)}")
+
 IO.puts("\n=== Creating project: Diablo 2 ===")
 {:ok, project} = rpc.(Orchid.Object, :create, [:project, "Diablo 2", "", [metadata: %{status: :active}]])
 IO.puts("  project ID: #{project.id}")

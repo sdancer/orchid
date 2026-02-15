@@ -12,10 +12,10 @@ defmodule Orchid.LLM.Anthropic do
   Send a chat request to Claude.
   """
   def chat(config, context) do
-    api_key = config[:api_key] || Orchid.Object.get_fact_value("anthropic_api_key") || System.get_env("ANTHROPIC_API_KEY")
+    api_key = config[:api_key] || Orchid.Object.get_fact_value("anthropic_api_key")
 
     if is_nil(api_key) do
-      {:error, {:api_key_missing, "ANTHROPIC_API_KEY not set. Add it in Settings > Facts as 'anthropic_api_key', or set the ANTHROPIC_API_KEY env var."}}
+      {:error, {:api_key_missing, "anthropic_api_key fact not set. Add it in Settings > Facts or local facts file."}}
     else
 
     body = build_request_body(config, context)
@@ -43,10 +43,10 @@ defmodule Orchid.LLM.Anthropic do
   Send a streaming chat request to Claude.
   """
   def chat_stream(config, context, callback) do
-    api_key = config[:api_key] || Orchid.Object.get_fact_value("anthropic_api_key") || System.get_env("ANTHROPIC_API_KEY")
+    api_key = config[:api_key] || Orchid.Object.get_fact_value("anthropic_api_key")
 
     if is_nil(api_key) do
-      {:error, {:api_key_missing, "ANTHROPIC_API_KEY not set. Add it in Settings > Facts as 'anthropic_api_key', or set the ANTHROPIC_API_KEY env var."}}
+      {:error, {:api_key_missing, "anthropic_api_key fact not set. Add it in Settings > Facts or local facts file."}}
     else
 
     body = build_request_body(config, context) |> Map.put(:stream, true)

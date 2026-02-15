@@ -24,6 +24,8 @@ orchid_temp-*.tar
 
 .claude_tokens.json
 .env
+.orchid/*
+!.orchid/facts.local.example.json
 
 # CubDB persistent data
 /priv/data/

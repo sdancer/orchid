@@ -11,7 +11,8 @@ defmodule Orchid.LLM.Gemini do
     gemini_pro: "gemini-2.5-pro",
     gemini_flash: "gemini-2.5-flash",
     gemini_flash_image: "gemini-2.5-flash-image",
-    gemini_3_flash: "gemini-3-flash-preview"
+    gemini_3_flash: "gemini-3-flash-preview",
+    gemini_3_pro: "gemini-3-pro-preview"
   }
 
   @doc """
@@ -132,8 +133,8 @@ defmodule Orchid.LLM.Gemini do
   # Private functions
 
   defp get_api_key(config) do
-    case config[:api_key] || Orchid.Object.get_fact_value("gemini_api_key") || System.get_env("GEMINI_API_KEY") do
-      nil -> {:error, {:api_key_missing, "GEMINI_API_KEY not set. Add it in Settings > Facts as 'gemini_api_key', or set the GEMINI_API_KEY env var."}}
+    case config[:api_key] || Orchid.Object.get_fact_value("gemini_api_key") do
+      nil -> {:error, {:api_key_missing, "gemini_api_key fact not set. Add it in Settings > Facts or local facts file."}}
       key -> {:ok, key}
     end
   end

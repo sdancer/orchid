@@ -9,7 +9,8 @@ defmodule Orchid.LLM.OpenRouter do
 
   @models %{
     minimax_m2_5: "minimax/minimax-m2.5",
-    glm_5: "z-ai/glm-5"
+    glm_5: "z-ai/glm-5",
+    kimi_k2_5: "moonshotai/kimi-k2.5"
   }
 
   @default_model :minimax_m2_5
@@ -101,8 +102,8 @@ defmodule Orchid.LLM.OpenRouter do
   # Private
 
   defp get_api_key(config) do
-    case config[:api_key] || Orchid.Object.get_fact_value("openrouter_api_key") || System.get_env("OPENROUTER_API_KEY") do
-      nil -> {:error, {:api_key_missing, "OPENROUTER_API_KEY not set. Add it in Settings > Facts as 'openrouter_api_key', or set the OPENROUTER_API_KEY env var."}}
+    case config[:api_key] || Orchid.Object.get_fact_value("openrouter_api_key") do
+      nil -> {:error, {:api_key_missing, "openrouter_api_key fact not set. Add it in Settings > Facts or local facts file."}}
       key -> {:ok, key}
     end
   end

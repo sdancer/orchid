@@ -1647,6 +1647,10 @@ defmodule OrchidWeb.AgentLive do
                           <option value="opus" selected={@decomp_model == :opus}>Opus</option>
                           <option value="sonnet" selected={@decomp_model == :sonnet}>Sonnet</option>
                           <option value="haiku" selected={@decomp_model == :haiku}>Haiku</option>
+                          <option value="gemini_3_pro" selected={@decomp_model == :gemini_3_pro}>Gemini 3 Pro</option>
+                          <option value="minimax_m2_5" selected={@decomp_model == :minimax_m2_5}>MiniMax M2.5</option>
+                          <option value="glm_5" selected={@decomp_model == :glm_5}>GLM-5</option>
+                          <option value="kimi_k2_5" selected={@decomp_model == :kimi_k2_5}>Kimi K2.5</option>
                         </select>
                         <input
                           type="number"
@@ -2234,6 +2238,10 @@ defmodule OrchidWeb.AgentLive do
   defp parse_decomp_model("opus"), do: :opus
   defp parse_decomp_model("sonnet"), do: :sonnet
   defp parse_decomp_model("haiku"), do: :haiku
+  defp parse_decomp_model("gemini_3_pro"), do: :gemini_3_pro
+  defp parse_decomp_model("minimax_m2_5"), do: :minimax_m2_5
+  defp parse_decomp_model("glm_5"), do: :glm_5
+  defp parse_decomp_model("kimi_k2_5"), do: :kimi_k2_5
   defp parse_decomp_model(_), do: :sonnet
 
   defp clamp_int(raw, default, min, max) when is_binary(raw) do

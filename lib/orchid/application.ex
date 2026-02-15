@@ -1,6 +1,7 @@
 defmodule Orchid.Application do
   @moduledoc false
   use Application
+  require Logger
 
   @impl true
   def start(_type, _args) do
@@ -30,7 +31,22 @@ defmodule Orchid.Application do
 
     with {:ok, pid} <- Supervisor.start_link(children, opts) do
       Orchid.Seeds.seed_templates()
+      log_facts_seed_result(Orchid.Facts.seed_from_local_file())
       {:ok, pid}
     end
+  end
+
+  defp log_facts_seed_result({:ok, %{missing: true, path: path}}) do
+    Logger.info("Local facts file not found at #{path}; skipping facts seed")
+  end
+
+  defp log_facts_seed_result({:ok, %{path: path} = result}) do
+    Logger.info(
+      "Seeded local facts from #{path}: created=#{result.created} updated=#{result.updated} skipped=#{result.skipped}"
+    )
+  end
+
+  defp log_facts_seed_result(other) do
+    Logger.warning("Facts seed returned unexpected result: #{inspect(other)}")
   end
 end

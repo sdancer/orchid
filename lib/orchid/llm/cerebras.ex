@@ -22,10 +22,10 @@ defmodule Orchid.LLM.Cerebras do
   Send a chat request to Cerebras.
   """
   def chat(config, context) do
-    api_key = config[:api_key] || Orchid.Object.get_fact_value("cerebras_api_key") || System.get_env("CEREBRAS_API_KEY")
+    api_key = config[:api_key] || Orchid.Object.get_fact_value("cerebras_api_key")
 
     if is_nil(api_key) do
-      {:error, {:api_key_missing, "CEREBRAS_API_KEY not set. Add it in Settings > Facts as 'cerebras_api_key', or set the CEREBRAS_API_KEY env var."}}
+      {:error, {:api_key_missing, "cerebras_api_key fact not set. Add it in Settings > Facts or local facts file."}}
     else
       model = resolve_model(config[:model])
       body = build_request_body(config, context, model)
@@ -59,10 +59,10 @@ defmodule Orchid.LLM.Cerebras do
   Send a streaming chat request to Cerebras.
   """
   def chat_stream(config, context, callback) do
-    api_key = config[:api_key] || Orchid.Object.get_fact_value("cerebras_api_key") || System.get_env("CEREBRAS_API_KEY")
+    api_key = config[:api_key] || Orchid.Object.get_fact_value("cerebras_api_key")
 
     if is_nil(api_key) do
-      {:error, {:api_key_missing, "CEREBRAS_API_KEY not set. Add it in Settings > Facts as 'cerebras_api_key', or set the CEREBRAS_API_KEY env var."}}
+      {:error, {:api_key_missing, "cerebras_api_key fact not set. Add it in Settings > Facts or local facts file."}}
     else
       model = resolve_model(config[:model])
       body = build_request_body(config, context, model) |> Map.put(:stream, true)
