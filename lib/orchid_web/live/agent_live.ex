@@ -32,6 +32,14 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:assigning_goal, nil)
       |> assign(:goals_view_mode, :list)
       |> assign(:hide_completed_goals, false)
+      |> assign(:project_tab, :goals)
+      |> assign(:decomp_goal_text, "")
+      |> assign(:decomp_num_paths, 3)
+      |> assign(:decomp_max_iterations, 3)
+      |> assign(:decomp_model, :sonnet)
+      |> assign(:decomp_running, false)
+      |> assign(:decomp_result, nil)
+      |> assign(:decomp_error, nil)
       |> assign(:templates, Orchid.Object.list_agent_templates())
       |> then(fn s ->
         templates = s.assigns.templates
@@ -376,8 +384,11 @@ defmodule OrchidWeb.AgentLive do
     {:noreply,
      socket
      |> assign(:current_project, id)
+     |> assign(:project_tab, :goals)
      |> assign(:goals, Orchid.Goals.list_for_project(id))
      |> assign(:mcp_calls, recent_mcp_calls(id, 40))
+     |> assign(:decomp_result, nil)
+     |> assign(:decomp_error, nil)
      |> refresh_sandbox_statuses()}
   end
 
@@ -586,6 +597,88 @@ defmodule OrchidWeb.AgentLive do
     {:noreply, assign(socket, :hide_completed_goals, !socket.assigns.hide_completed_goals)}
   end
 
+  def handle_event("set_project_tab", %{"tab" => tab}, socket) do
+    project_tab =
+      case tab do
+        "decomposition" -> :decomposition
+        _ -> :goals
+      end
+
+    {:noreply, assign(socket, :project_tab, project_tab)}
+  end
+
+  def handle_event("update_decomp_goal", %{"goal" => goal}, socket) do
+    {:noreply, assign(socket, :decomp_goal_text, goal)}
+  end
+
+  def handle_event("update_decomp_num_paths", %{"num_paths" => raw}, socket) do
+    {:noreply, assign(socket, :decomp_num_paths, clamp_int(raw, 3, 1, 8))}
+  end
+
+  def handle_event("update_decomp_max_iterations", %{"max_iterations" => raw}, socket) do
+    {:noreply, assign(socket, :decomp_max_iterations, clamp_int(raw, 3, 0, 6))}
+  end
+
+  def handle_event("update_decomp_model", %{"model" => model}, socket) do
+    {:noreply, assign(socket, :decomp_model, parse_decomp_model(model))}
+  end
+
+  def handle_event("run_decomposition_test", params, socket) do
+    project_id = socket.assigns.current_project
+    objective = String.trim(params["goal"] || socket.assigns.decomp_goal_text || "")
+    model = parse_decomp_model(params["model"] || Atom.to_string(socket.assigns.decomp_model))
+    num_paths = clamp_int(params["num_paths"], socket.assigns.decomp_num_paths, 1, 8)
+    max_iterations = clamp_int(params["max_iterations"], socket.assigns.decomp_max_iterations, 0, 6)
+
+    cond do
+      socket.assigns.decomp_running ->
+        {:noreply, socket}
+
+      is_nil(project_id) ->
+        {:noreply, assign(socket, :decomp_error, "Select a project first.")}
+
+      objective == "" ->
+        {:noreply, assign(socket, :decomp_error, "Enter a goal/objective to decompose.")}
+
+      true ->
+        started_ms = System.monotonic_time(:millisecond)
+        pid = self()
+
+        socket =
+          socket
+          |> assign(:decomp_goal_text, objective)
+          |> assign(:decomp_model, model)
+          |> assign(:decomp_num_paths, num_paths)
+          |> assign(:decomp_max_iterations, max_iterations)
+          |> assign(:decomp_running, true)
+          |> assign(:decomp_error, nil)
+          |> assign(:decomp_result, nil)
+
+        Task.start(fn ->
+          opts = [
+            num_paths: num_paths,
+            max_iterations: max_iterations,
+            project_id: project_id,
+            llm_config: %{provider: :cli, model: model}
+          ]
+
+          result =
+            case Orchid.Planner.plan(objective, Orchid.Sandbox.status(project_id), opts) do
+              {:ok, best_plan} ->
+                {:ok, best_plan}
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+
+          duration_ms = System.monotonic_time(:millisecond) - started_ms
+          send(pid, {:decomposition_test_done, result, duration_ms, model, num_paths, max_iterations})
+        end)
+
+        {:noreply, socket}
+    end
+  end
+
   def handle_event("start_assign_goal", %{"id" => id}, socket) do
     {:noreply, assign(socket, :assigning_goal, id)}
   end
@@ -782,6 +875,38 @@ defmodule OrchidWeb.AgentLive do
         assign(socket, :mcp_calls, calls)
       else
         socket
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_info(
+        {:decomposition_test_done, result, duration_ms, model, num_paths, max_iterations},
+        socket
+      ) do
+    socket =
+      case result do
+        {:ok, best_plan} ->
+          assign(socket,
+            decomp_running: false,
+            decomp_error: nil,
+            decomp_result: %{
+              best_plan: best_plan,
+              steps: split_plan_steps(best_plan),
+              duration_ms: duration_ms,
+              model: model,
+              num_paths: num_paths,
+              max_iterations: max_iterations,
+              ran_at: DateTime.utc_now()
+            }
+          )
+
+        {:error, reason} ->
+          assign(socket,
+            decomp_running: false,
+            decomp_result: nil,
+            decomp_error: "Planner failed: #{inspect(reason)}"
+          )
       end
 
     {:noreply, socket}
@@ -1208,6 +1333,22 @@ defmodule OrchidWeb.AgentLive do
                   </div>
                 </div>
 
+                <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+                  <button
+                    class={"btn btn-secondary btn-sm"}
+                    style={"padding: 0.2rem 0.6rem; font-size: 0.75rem; #{if @project_tab == :goals, do: "border-color: #58a6ff; color: #58a6ff;", else: ""}"}
+                    phx-click="set_project_tab"
+                    phx-value-tab="goals"
+                  >Goals</button>
+                  <button
+                    class={"btn btn-secondary btn-sm"}
+                    style={"padding: 0.2rem 0.6rem; font-size: 0.75rem; #{if @project_tab == :decomposition, do: "border-color: #58a6ff; color: #58a6ff;", else: ""}"}
+                    phx-click="set_project_tab"
+                    phx-value-tab="decomposition"
+                  >Decomposition Lab</button>
+                </div>
+
+                <%= if @project_tab == :goals do %>
                 <div class="goals-section" style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin-bottom: 1rem;">
                   <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
                     <h3 style="color: #c9d1d9; margin: 0; font-size: 1rem;">Goals</h3>
@@ -1491,6 +1632,88 @@ defmodule OrchidWeb.AgentLive do
                     <% end %>
                   <% end %>
                 </div>
+                <% else %>
+                <div class="goals-section" style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin-bottom: 1rem;">
+                  <form phx-submit="run_decomposition_test">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem;">
+                      <h3 style="color: #c9d1d9; margin: 0; font-size: 1rem;">Goal -> Plan Decomposition</h3>
+                      <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <select
+                          class="sidebar-search"
+                          style="font-size: 0.8rem; padding: 0.2rem 0.5rem;"
+                          phx-change="update_decomp_model"
+                          name="model"
+                        >
+                          <option value="opus" selected={@decomp_model == :opus}>Opus</option>
+                          <option value="sonnet" selected={@decomp_model == :sonnet}>Sonnet</option>
+                          <option value="haiku" selected={@decomp_model == :haiku}>Haiku</option>
+                        </select>
+                        <input
+                          type="number"
+                          min="1"
+                          max="8"
+                          name="num_paths"
+                          value={@decomp_num_paths}
+                          phx-change="update_decomp_num_paths"
+                          class="sidebar-search"
+                          style="width: 4.5rem; font-size: 0.8rem; padding: 0.2rem 0.4rem;"
+                          title="num_paths"
+                        />
+                        <input
+                          type="number"
+                          min="0"
+                          max="6"
+                          name="max_iterations"
+                          value={@decomp_max_iterations}
+                          phx-change="update_decomp_max_iterations"
+                          class="sidebar-search"
+                          style="width: 4.5rem; font-size: 0.8rem; padding: 0.2rem 0.4rem;"
+                          title="max_iterations"
+                        />
+                        <button class="btn btn-sm" type="submit" disabled={@decomp_running}>
+                          <%= if @decomp_running, do: "Running...", else: "Run" %>
+                        </button>
+                      </div>
+                    </div>
+
+                    <textarea
+                      name="goal"
+                      phx-change="update_decomp_goal"
+                      class="sidebar-search"
+                      placeholder="Enter a goal/objective to decompose into a robust implementation plan..."
+                      style="width: 100%; min-height: 5.5rem; resize: vertical; margin-bottom: 0.75rem;"
+                    ><%= @decomp_goal_text %></textarea>
+                  </form>
+
+                  <%= if @decomp_error do %>
+                    <div style="background: #3d1114; color: #f85149; border: 1px solid #f85149; border-radius: 4px; padding: 0.5rem; font-size: 0.85rem; margin-bottom: 0.75rem;">
+                      <%= @decomp_error %>
+                    </div>
+                  <% end %>
+
+                  <%= if @decomp_result do %>
+                    <div style="margin-bottom: 0.6rem; color: #8b949e; font-size: 0.8rem;">
+                      model=<%= @decomp_result.model %> • paths=<%= @decomp_result.num_paths %> • iterations=<%= @decomp_result.max_iterations %> • duration=<%= @decomp_result.duration_ms %>ms • <%= short_time(@decomp_result.ran_at) %>
+                    </div>
+                    <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.75rem; margin-bottom: 0.75rem;">
+                      <div style="color: #8b949e; font-size: 0.75rem; margin-bottom: 0.35rem;">Best Plan (Raw)</div>
+                      <pre style="margin: 0; white-space: pre-wrap; color: #c9d1d9; font-size: 0.85rem;"><%= @decomp_result.best_plan %></pre>
+                    </div>
+
+                    <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.75rem;">
+                      <div style="color: #8b949e; font-size: 0.75rem; margin-bottom: 0.4rem;">Decomposed Steps</div>
+                      <%= for {step, idx} <- Enum.with_index(@decomp_result.steps, 1) do %>
+                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.35rem; font-size: 0.85rem;">
+                          <span style="color: #58a6ff; min-width: 1.4rem;"><%= idx %>.</span>
+                          <span style="color: #c9d1d9; white-space: pre-wrap; word-break: break-word;"><%= step %></span>
+                        </div>
+                      <% end %>
+                    </div>
+                  <% else %>
+                    <div style="color: #8b949e; font-size: 0.85rem;">No run yet.</div>
+                  <% end %>
+                </div>
+                <% end %>
 
                 <h3 style="color: #c9d1d9; margin-bottom: 0.5rem;">Agents</h3>
               </div>
@@ -2007,4 +2230,33 @@ defmodule OrchidWeb.AgentLive do
       if category == "General", do: {0, category}, else: {1, category}
     end)
   end
+
+  defp parse_decomp_model("opus"), do: :opus
+  defp parse_decomp_model("sonnet"), do: :sonnet
+  defp parse_decomp_model("haiku"), do: :haiku
+  defp parse_decomp_model(_), do: :sonnet
+
+  defp clamp_int(raw, default, min, max) when is_binary(raw) do
+    case Integer.parse(raw) do
+      {v, _} -> v |> Kernel.max(min) |> Kernel.min(max)
+      _ -> default
+    end
+  end
+
+  defp clamp_int(v, _default, min, max) when is_integer(v), do: v |> Kernel.max(min) |> Kernel.min(max)
+  defp clamp_int(_v, default, _min, _max), do: default
+
+  defp split_plan_steps(plan) when is_binary(plan) do
+    steps =
+      plan
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(&Regex.replace(~r/^(?:\d+[\).\]]|[-*])\s+/, &1, ""))
+      |> Enum.reject(&(&1 == ""))
+
+    if steps == [], do: [plan], else: steps
+  end
+
+  defp split_plan_steps(_), do: []
 end
