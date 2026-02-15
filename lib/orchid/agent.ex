@@ -564,7 +564,7 @@ defmodule Orchid.Agent do
             report: report,
             completion_summary: summary,
             last_error: nil,
-            reviewed_by: "haiku"
+            reviewed_by: "sonnet"
           })
 
         {:ok, %{completed: false, summary: summary, error: error}} ->
@@ -577,7 +577,7 @@ defmodule Orchid.Agent do
             report: report,
             completion_summary: summary,
             last_error: error || "Reviewer marked incomplete",
-            reviewed_by: "haiku"
+            reviewed_by: "sonnet"
           })
 
           maybe_retry_after_incomplete_review(agent_id, goal, summary, error)
@@ -592,7 +592,7 @@ defmodule Orchid.Agent do
             report: report,
             completion_summary: nil,
             last_error: "Completion review failed: #{inspect(reason)}",
-            reviewed_by: "haiku"
+            reviewed_by: "sonnet"
           })
       end
     end
@@ -792,7 +792,7 @@ defmodule Orchid.Agent do
 
     config = %{
       provider: :cli,
-      model: :haiku,
+      model: :sonnet,
       max_tokens: 600,
       max_turns: 8,
       disable_tools: true

@@ -6,6 +6,32 @@ defmodule Orchid.Sandbox.Overlay do
   """
 
   @doc """
+  Create a lightweight temporary overlay context for verification/dry-run logic.
+  """
+  def branch(base_sandbox) do
+    id = :erlang.unique_integer([:positive, :monotonic])
+    tmp_dir = Path.join(System.tmp_dir!(), "orchid-overlay-#{id}")
+    File.mkdir_p!(tmp_dir)
+
+    %{
+      id: id,
+      base: base_sandbox,
+      tmp_dir: tmp_dir,
+      created_at: DateTime.utc_now()
+    }
+  end
+
+  @doc """
+  Discard a temporary overlay context created by `branch/1`.
+  """
+  def discard(%{tmp_dir: tmp_dir}) when is_binary(tmp_dir) do
+    _ = File.rm_rf(tmp_dir)
+    :ok
+  end
+
+  def discard(_), do: :ok
+
+  @doc """
   Read a file, checking upper dir first then lower.
   """
   def union_read(rel_path, upper, lower) do

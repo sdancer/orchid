@@ -24,6 +24,7 @@ defmodule Orchid.Tool do
     Orchid.Tools.GoalRead,
     Orchid.Tools.GoalCreate,
     Orchid.Tools.GoalUpdate,
+    Orchid.Tools.PlanAletheia,
     Orchid.Tools.TaskReport,
     Orchid.Tools.SandboxReset,
     Orchid.Tools.AgentSpawn,

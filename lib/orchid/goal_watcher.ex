@@ -332,14 +332,14 @@ defmodule Orchid.GoalWatcher do
     case summarize_last_update(assistant_msg, assigned_pending) do
       {:ok, %{status: status, summary: summary, error: error}} ->
         """
-        Review of your last update (Haiku):
+        Review of your last update (Sonnet):
         - Status: #{status}
         - Summary: #{summary}
         #{if(error, do: "- Error: #{error}", else: "")}
 
         Pending goals: #{goal_names}
 
-        If work is complete, call `goal_update` with status `completed` and include a concise report.
+        If work is complete, call `task_report` with `outcome: "success"` and include a concise report.
         If blocked, continue execution and report the exact failing command/output.
         """
         |> String.trim()
@@ -380,7 +380,7 @@ defmodule Orchid.GoalWatcher do
       memory: %{}
     }
 
-    config = %{provider: :cli, model: :haiku, max_turns: 8, max_tokens: 500, disable_tools: true}
+    config = %{provider: :cli, model: :sonnet, max_turns: 8, max_tokens: 500, disable_tools: true}
 
     with {:ok, %{content: raw}} <- LLM.chat(config, context),
          {:ok, parsed} <- parse_summary_json(raw) do

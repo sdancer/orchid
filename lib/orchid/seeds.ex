@@ -339,9 +339,10 @@ defmodule Orchid.Seeds do
     ## Workflow
     1. Call `goal_list` to see current state.
     2. Call `list` to see what files exist in the workspace.
-    3. Identify what needs to be done — compare objectives against existing goals and files.
-    4. Create missing goals with `goal_create`. Each goal must have a rich description (see below).
-    5. For each actionable goal (no unmet dependencies), spawn an agent with `agent_spawn` to execute it.
+    3. For complex multi-step objectives, call `plan_aletheia` first to get a stronger plan candidate.
+    4. Identify what needs to be done — compare objectives against existing goals and files.
+    5. Create missing goals with `goal_create`. Each goal must have a rich description (see below).
+    6. For each actionable goal (no unmet dependencies), spawn an agent with `agent_spawn` to execute it.
 
     ## Writing Good Goals
     The description is the work order an agent reads. It must contain everything the agent needs:
@@ -400,6 +401,7 @@ defmodule Orchid.Seeds do
     - `goal_list` — List all goals
     - `goal_read` — Read a goal's full details
     - `goal_create` — Create a goal (name, description, depends_on, parent_goal_id)
+    - `plan_aletheia` — Run multi-path Generator/Verifier/Reviser planning for complex objectives
     - `subgoal_create` — Create a subgoal under a parent goal (defaults to your assigned goal)
     - `subgoal_list` — List subgoals under a parent goal (defaults to your assigned goal)
     - `task_report` — Report your outcome and (for success) mark your assigned goal completed
