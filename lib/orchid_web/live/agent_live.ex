@@ -655,6 +655,13 @@ defmodule OrchidWeb.AgentLive do
           |> assign(:decomp_result, nil)
 
         Task.start(fn ->
+          raw_output =
+            case Orchid.LLM.Aletheia.generate_paths(objective, num_paths, %{model: model}) do
+              {:ok, [raw | _]} when is_binary(raw) -> raw
+              {:ok, plans} when is_list(plans) -> Enum.join(plans, "\n\n---\n\n")
+              {:error, reason} -> "Raw generation failed: #{inspect(reason)}"
+            end
+
           opts = [
             num_paths: num_paths,
             max_iterations: max_iterations,
@@ -672,7 +679,7 @@ defmodule OrchidWeb.AgentLive do
             end
 
           duration_ms = System.monotonic_time(:millisecond) - started_ms
-          send(pid, {:decomposition_test_done, result, duration_ms, model, num_paths, max_iterations})
+          send(pid, {:decomposition_test_done, result, raw_output, duration_ms, model, num_paths, max_iterations})
         end)
 
         {:noreply, socket}
@@ -881,7 +888,7 @@ defmodule OrchidWeb.AgentLive do
   end
 
   def handle_info(
-        {:decomposition_test_done, result, duration_ms, model, num_paths, max_iterations},
+        {:decomposition_test_done, result, raw_output, duration_ms, model, num_paths, max_iterations},
         socket
       ) do
     socket =
@@ -891,8 +898,8 @@ defmodule OrchidWeb.AgentLive do
             decomp_running: false,
             decomp_error: nil,
             decomp_result: %{
+              raw_output: raw_output,
               best_plan: best_plan,
-              steps: split_plan_steps(best_plan),
               duration_ms: duration_ms,
               model: model,
               num_paths: num_paths,
@@ -904,7 +911,16 @@ defmodule OrchidWeb.AgentLive do
         {:error, reason} ->
           assign(socket,
             decomp_running: false,
-            decomp_result: nil,
+            decomp_result: %{
+              raw_output: raw_output,
+              best_plan: nil,
+              duration_ms: duration_ms,
+              model: model,
+              num_paths: num_paths,
+              max_iterations: max_iterations,
+              ran_at: DateTime.utc_now(),
+              planner_error: inspect(reason)
+            },
             decomp_error: "Planner failed: #{inspect(reason)}"
           )
       end
@@ -1700,19 +1716,20 @@ defmodule OrchidWeb.AgentLive do
                       model=<%= @decomp_result.model %> • paths=<%= @decomp_result.num_paths %> • iterations=<%= @decomp_result.max_iterations %> • duration=<%= @decomp_result.duration_ms %>ms • <%= short_time(@decomp_result.ran_at) %>
                     </div>
                     <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.75rem; margin-bottom: 0.75rem;">
-                      <div style="color: #8b949e; font-size: 0.75rem; margin-bottom: 0.35rem;">Best Plan (Raw)</div>
-                      <pre style="margin: 0; white-space: pre-wrap; color: #c9d1d9; font-size: 0.85rem;"><%= @decomp_result.best_plan %></pre>
+                      <div style="color: #8b949e; font-size: 0.75rem; margin-bottom: 0.35rem;">Raw Model Output</div>
+                      <pre style="margin: 0; white-space: pre-wrap; color: #c9d1d9; font-size: 0.85rem;"><%= @decomp_result.raw_output %></pre>
                     </div>
-
-                    <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.75rem;">
-                      <div style="color: #8b949e; font-size: 0.75rem; margin-bottom: 0.4rem;">Decomposed Steps</div>
-                      <%= for {step, idx} <- Enum.with_index(@decomp_result.steps, 1) do %>
-                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.35rem; font-size: 0.85rem;">
-                          <span style="color: #58a6ff; min-width: 1.4rem;"><%= idx %>.</span>
-                          <span style="color: #c9d1d9; white-space: pre-wrap; word-break: break-word;"><%= step %></span>
-                        </div>
-                      <% end %>
-                    </div>
+                    <%= if @decomp_result.best_plan do %>
+                      <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.75rem;">
+                        <div style="color: #8b949e; font-size: 0.75rem; margin-bottom: 0.35rem;">Planner Selected Plan</div>
+                        <pre style="margin: 0; white-space: pre-wrap; color: #c9d1d9; font-size: 0.85rem;"><%= @decomp_result.best_plan %></pre>
+                      </div>
+                    <% end %>
+                    <%= if @decomp_result[:planner_error] do %>
+                      <div style="margin-top: 0.5rem; color: #f85149; font-size: 0.8rem;">
+                        planner_error=<%= @decomp_result.planner_error %>
+                      </div>
+                    <% end %>
                   <% else %>
                     <div style="color: #8b949e; font-size: 0.85rem;">No run yet.</div>
                   <% end %>
@@ -2254,17 +2271,4 @@ defmodule OrchidWeb.AgentLive do
   defp clamp_int(v, _default, min, max) when is_integer(v), do: v |> Kernel.max(min) |> Kernel.min(max)
   defp clamp_int(_v, default, _min, _max), do: default
 
-  defp split_plan_steps(plan) when is_binary(plan) do
-    steps =
-      plan
-      |> String.split("\n")
-      |> Enum.map(&String.trim/1)
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.map(&Regex.replace(~r/^(?:\d+[\).\]]|[-*])\s+/, &1, ""))
-      |> Enum.reject(&(&1 == ""))
-
-    if steps == [], do: [plan], else: steps
-  end
-
-  defp split_plan_steps(_), do: []
 end

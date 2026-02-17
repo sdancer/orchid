@@ -127,14 +127,17 @@ defmodule Orchid.LLM.OpenRouter do
       max_tokens: Map.get(config, :max_tokens, 65536)
     }
 
-    # Add tools
-    tools = Orchid.Tool.list_tools()
-
-    if tools != [] do
-      openai_tools = format_tools(tools)
-      Map.put(body, :tools, openai_tools)
-    else
+    if config[:disable_tools] do
       body
+    else
+      tools = Orchid.Tool.list_tools()
+
+      if tools != [] do
+        openai_tools = format_tools(tools)
+        Map.put(body, :tools, openai_tools)
+      else
+        body
+      end
     end
   end
 
@@ -206,7 +209,7 @@ defmodule Orchid.LLM.OpenRouter do
 
   defp parse_response(response) do
     message = get_in(response, ["choices", Access.at(0), "message"]) || %{}
-    text = message["content"] || ""
+    text = extract_text_content(message, response)
 
     tool_calls =
       case message["tool_calls"] do
@@ -226,6 +229,42 @@ defmodule Orchid.LLM.OpenRouter do
       end
 
     {:ok, %{content: text, tool_calls: tool_calls}}
+  end
+
+  defp extract_text_content(message, response) do
+    base =
+      case Map.get(message, "content") do
+        text when is_binary(text) ->
+          text
+
+        parts when is_list(parts) ->
+          parts
+          |> Enum.map(fn
+            %{"type" => "text", "text" => t} when is_binary(t) -> t
+            %{"text" => t} when is_binary(t) -> t
+            %{"content" => t} when is_binary(t) -> t
+            t when is_binary(t) -> t
+            _ -> nil
+          end)
+          |> Enum.reject(&is_nil/1)
+          |> Enum.join("\n")
+
+        _ ->
+          ""
+      end
+
+    if String.trim(base) != "" do
+      base
+    else
+      fallback =
+        message["reasoning"] ||
+          message["reasoning_content"] ||
+          message["refusal"] ||
+          get_in(response, ["choices", Access.at(0), "text"]) ||
+          ""
+
+      if is_binary(fallback), do: fallback, else: inspect(fallback)
+    end
   end
 
   defp process_stream_chunk(chunk, acc, callback) do

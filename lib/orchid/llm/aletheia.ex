@@ -31,9 +31,16 @@ defmodule Orchid.LLM.Aletheia do
     {"plans":["plan 1","plan 2","plan 3"]}
     """
 
-    with {:ok, raw} <- llm_text(prompt, llm_config),
-         {:ok, plans} <- parse_plan_list(raw, num_paths) do
-      {:ok, plans}
+    with {:ok, raw} <- llm_text(prompt, llm_config) do
+      text = String.trim(raw)
+
+      if text == "" do
+        {:error, "Model returned empty planning output"}
+      else
+        # Parsing disabled intentionally: return raw model output as-is.
+        # Planner can still run on this single path while GUI shows raw text.
+        {:ok, [text]}
+      end
     end
   end
 
@@ -120,6 +127,10 @@ defmodule Orchid.LLM.Aletheia do
   end
 
   defp llm_text(prompt, llm_config) when is_binary(prompt) do
+    do_llm_text(prompt, llm_config, false)
+  end
+
+  defp do_llm_text(prompt, llm_config, retried?) when is_binary(prompt) do
     config = Map.merge(@default_config, Map.take(llm_config || %{}, [:provider, :model]))
 
     context = %{
@@ -131,38 +142,31 @@ defmodule Orchid.LLM.Aletheia do
 
     case LLM.chat(config, context) do
       {:ok, %{content: content}} when is_binary(content) ->
-        {:ok, String.trim(content)}
+        trimmed = String.trim(content)
+
+        cond do
+          trimmed != "" ->
+            {:ok, trimmed}
+
+          retried? ->
+            {:error, "Model returned empty planning output"}
+
+          true ->
+            retry_prompt =
+              """
+              The previous response was empty.
+              Reply with a non-empty plain text answer now.
+
+              #{prompt}
+              """
+              |> String.trim()
+
+            do_llm_text(retry_prompt, llm_config, true)
+        end
 
       {:error, reason} ->
         {:error, inspect(reason)}
     end
-  end
-
-  defp parse_plan_list(raw, num_paths) do
-    parsed =
-      case Jason.decode(raw) do
-        {:ok, %{"plans" => plans}} when is_list(plans) -> plans
-        _ -> nil
-      end
-
-    plans =
-      (parsed || parse_numbered_plans(raw))
-      |> Enum.map(&String.trim(to_string(&1)))
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.uniq()
-      |> Enum.take(num_paths)
-
-    if plans == [] do
-      {:error, "No valid plans were generated"}
-    else
-      {:ok, plans}
-    end
-  end
-
-  defp parse_numbered_plans(raw) do
-    raw
-    |> String.split(~r/\n+\s*(?:\d+[\).\]]|[-*])\s+/, trim: true)
-    |> Enum.reject(&(&1 == ""))
   end
 
   defp parse_critique(raw) when is_binary(raw) do
