@@ -4,6 +4,7 @@ defmodule Orchid.Agent.Verifier do
   """
   require Logger
 
+  alias Orchid.Agent.Logging
   alias Orchid.LLM
 
   @min_retry_backoff_ms 1_000
@@ -14,16 +15,39 @@ defmodule Orchid.Agent.Verifier do
     provider: :gemini,
     model: :gemini_3_1_pro_preview,
     thinking_level: "HIGH",
+    response_mime_type: "application/json",
     disable_tools: true,
     max_turns: 1,
-    max_tokens: 1_200
+    max_tokens: 20_000
   }
 
   @spec critique(String.t(), list(), map()) :: {:approved, String.t()} | {:flawed, String.t()}
   def critique(objective, plan, llm_config \\ %{}) when is_binary(objective) and is_list(plan) do
-    prompt = """
-    You are the Verifier node. Your job is to evaluate a Proposed Plan.
+    system_prompt = """
+    You are the Critical Verifier in a lazy hierarchical planning system. Your job is to evaluate a Proposed Plan against a specific Objective.
 
+    CORE PHILOSOPHY: LAZY HIERARCHICAL PLANNING
+    The system uses "lazy evaluation" for task decomposition. The plan will consist of two types of nodes:
+    1. ACTIONABLE "TOOL" NODES: Concrete steps meant to be executed immediately.
+    2. HIGH-LEVEL "DELEGATE" NODES: Blocked, complex, or unresolved tasks that act as placeholders. Child agents will expand these later.
+
+    EVALUATION CRITERIA:
+    - Evaluate correctness at the CURRENT abstraction level of the plan.
+    - Do NOT reject a plan just because every sub-step is not fully expanded. "Delegate" tasks are perfectly valid for unknown or complex future steps.
+    - Do NOT require concrete leaf execution steps (like specific file names or exact shell flags) if a "delegate" step validly owns that discovery work.
+
+    GATING & DEPENDENCY LOGIC (CRITICAL):
+    - Dependencies must be logically ordered.
+    - If a blocking issue exists (e.g., reconnaissance, credentials, or discovery is needed to unblock later work), the plan MUST explicitly solve that blocker (via a tool or a delegate task) BEFORE subsequent dependent steps.
+    - If concrete "tool" tasks are scheduled before their required discovery/setup phases, the plan is deeply flawed.
+
+    BALANCED CRITIQUE PROCESS:
+    To prevent confirmation bias, you must analyze the plan from both sides before reaching a verdict.
+    1. First, argue why this plan is flawless and logically sound.
+    2. Second, argue why this plan is fundamentally broken, focusing on missing prerequisites, logic gaps, or out-of-order execution.
+    """
+
+    user_prompt = """
     OBJECTIVE:
     #{objective}
 
@@ -31,25 +55,26 @@ defmodule Orchid.Agent.Verifier do
     #{inspect(plan)}
 
     INSTRUCTIONS:
-    0. Assume decomposition is hierarchical and lazy:
-       - High-level tasks may defer lower-level details until execution.
-       - Do not reject a plan only because every sub-step is not fully expanded yet.
-       - But dependencies must still be logically ordered.
-    1. First argue why this plan could succeed.
-    2. Then argue why it could fail, focusing on missing prerequisites and logic gaps.
-    3. Treat true blockers as gating items:
-       - If a blocking issue exists (for example, reconnaissance/discovery needed to unblock later work),
-         the plan must explicitly solve that blocker before subsequent dependent steps.
-       - If blockers are not resolved early enough, mark the plan as flawed.
-    4. Return ONLY valid JSON:
-       {"status":"approved","reason":"..."}
-       or
-       {"status":"flawed","critique":"..."}
+    1. Open a <scratchpad> block. Inside it, write your balanced critique:
+       - Argue why the plan will succeed.
+       - Argue why the plan will fail.
+       - Analyze if any blockers/dependencies are out of order.
+    2. Close the </scratchpad> block.
+    3. Output the final verdict as strictly valid JSON.
+
+    JSON SCHEMA:
+    If the plan is logically sound at its current abstraction level:
+    {"status": "approved", "reason": "<brief justification>"}
+
+    If the plan has fatal dependency flaws or out-of-order blockers:
+    {"status": "flawed", "critique": "<specific instructions on what the Planner needs to fix>"}
+
+    Provide your response now:
     """
 
-    case llm_text(prompt, llm_config) do
+    case llm_text(system_prompt, user_prompt, llm_config) do
       {:ok, raw} ->
-        Logger.info("[NodeVerifier] Raw LLM response:\n#{raw}")
+        Logging.log_full("NodeVerifier", raw)
         parse_verdict(raw)
 
       {:error, reason} ->
@@ -57,12 +82,12 @@ defmodule Orchid.Agent.Verifier do
     end
   end
 
-  defp llm_text(prompt, llm_config) do
+  defp llm_text(system_prompt, user_prompt, llm_config) do
     config = Map.merge(@default_config, Map.take(llm_config || %{}, [:provider, :model]))
 
     context = %{
-      system: "",
-      messages: [%{role: :user, content: String.trim(prompt)}],
+      system: String.trim(system_prompt),
+      messages: [%{role: :user, content: String.trim(user_prompt)}],
       objects: "",
       memory: %{}
     }
