@@ -92,6 +92,7 @@ defmodule Orchid.LLM.CLI do
 
   defp build_shell_command(args, config) do
     claude_path = System.find_executable("claude") || "claude"
+    run_in_container = run_in_container?(config)
 
     cond do
       # Orchestrator with Orchid tools — run on host with MCP server
@@ -101,12 +102,19 @@ defmodule Orchid.LLM.CLI do
 
         "CLAUDECODE= #{claude_path} #{Enum.join(escaped_args, " ")} --mcp-config #{shell_escape(mcp_config)} --strict-mcp-config --tools ''"
 
-      # Worker agent — run inside sandbox container
-      config[:project_id] ->
+      # Worker agent in VM mode — run inside sandbox container
+      config[:project_id] && run_in_container ->
         container = "orchid-project-#{config[:project_id]}"
         escaped_args = Enum.map(args, &shell_escape/1)
         inner_cmd = "cd /workspace && claude #{Enum.join(escaped_args, " ")}"
         "podman exec #{container} sh -c #{shell_escape(inner_cmd)}"
+
+      # Worker agent in host mode — run on host in project directory
+      config[:project_id] ->
+        escaped_args = Enum.map(args, &shell_escape/1)
+        workspace = Orchid.Project.files_path(config[:project_id]) |> Path.expand()
+        host_cmd = "cd #{shell_escape(workspace)} && #{claude_path} #{Enum.join(escaped_args, " ")}"
+        "sh -c #{shell_escape(host_cmd)}"
 
       # No project — run on host
       true ->
@@ -236,7 +244,7 @@ defmodule Orchid.LLM.CLI do
         config[:permission_mode] ->
           args ++ ["--permission-mode", config[:permission_mode]]
 
-        config[:project_id] ->
+        config[:project_id] && run_in_container?(config) ->
           args ++ ["--dangerously-skip-permissions"]
 
         true ->
@@ -289,5 +297,10 @@ defmodule Orchid.LLM.CLI do
       nil -> "Continue based on system instructions and return a concise response."
       content -> content
     end
+  end
+
+  defp run_in_container?(config) do
+    mode = config[:execution_mode]
+    config[:project_id] && !config[:use_orchid_tools] && mode not in [:host, "host", :root_vm, "root_vm"]
   end
 end

@@ -14,6 +14,7 @@ defmodule Orchid.Agent do
       :id,
       :config,
       :project_id,
+      :execution_mode,
       :sandbox,
       messages: [],
       objects: [],
@@ -48,6 +49,10 @@ defmodule Orchid.Agent do
         },
         config
       )
+      |> then(fn cfg ->
+        default_mode = if cfg[:project_id], do: :vm, else: :host
+        Map.put_new(cfg, :execution_mode, default_mode)
+      end)
 
     case DynamicSupervisor.start_child(
            Orchid.AgentSupervisor,
@@ -207,14 +212,17 @@ defmodule Orchid.Agent do
 
   @impl true
   def init({id, config}) do
+    execution_mode = normalize_execution_mode(config[:execution_mode], config[:project_id])
+
     state = %State{
       id: id,
       config: config,
-      project_id: config[:project_id]
+      project_id: config[:project_id],
+      execution_mode: execution_mode
     }
 
     state =
-      if state.project_id do
+      if state.project_id && state.execution_mode == :vm do
         case Orchid.Projects.ensure_sandbox(state.project_id) do
           {:ok, _} ->
             sandbox_status = Orchid.Sandbox.status(state.project_id)
@@ -229,7 +237,7 @@ defmodule Orchid.Agent do
       end
 
     Logger.info(
-      "Agent #{id} started, project=#{inspect(state.project_id)}, provider=#{config[:provider]}, model=#{config[:model]}"
+      "Agent #{id} started, project=#{inspect(state.project_id)}, mode=#{state.execution_mode}, provider=#{config[:provider]}, model=#{config[:model]}"
     )
 
     publish_state(state)
@@ -256,19 +264,23 @@ defmodule Orchid.Agent do
   end
 
   def handle_call(:reset_sandbox, _from, state) do
-    if state.project_id do
-      case Orchid.Sandbox.reset(state.project_id) do
-        {:ok, status} ->
-          new_state = %{state | sandbox: status}
-          publish_state(new_state)
-          Store.put_agent_state(state.id, new_state)
-          {:reply, {:ok, status}, new_state}
-
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
-      end
+    if state.execution_mode == :host do
+      {:reply, {:error, :host_mode}, state}
     else
-      {:reply, {:error, :no_sandbox}, state}
+      if state.project_id do
+        case Orchid.Sandbox.reset(state.project_id) do
+          {:ok, status} ->
+            new_state = %{state | sandbox: status}
+            publish_state(new_state)
+            Store.put_agent_state(state.id, new_state)
+            {:reply, {:ok, status}, new_state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+      else
+        {:reply, {:error, :no_sandbox}, state}
+      end
     end
   end
 
@@ -1213,6 +1225,20 @@ defmodule Orchid.Agent do
       str
     else
       "(binary data, #{byte_size(str)} bytes — not valid UTF-8)"
+    end
+  end
+
+  defp normalize_execution_mode(mode, project_id) do
+    case mode do
+      :host -> :host
+      "host" -> :host
+      :root_vm -> :host
+      "root_vm" -> :host
+      :vm -> :vm
+      "vm" -> :vm
+      :sandbox -> :vm
+      "sandbox" -> :vm
+      _ -> if(project_id, do: :vm, else: :host)
     end
   end
 

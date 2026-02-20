@@ -251,6 +251,11 @@ defmodule Orchid.GoalWatcher do
             else: config
 
         config =
+          if is_list(planner.metadata[:allowed_tools]),
+            do: Map.put(config, :allowed_tools, planner.metadata[:allowed_tools]),
+            else: config
+
+        config =
           if planner.metadata[:use_orchid_tools],
             do: Map.put(config, :use_orchid_tools, true),
             else: config

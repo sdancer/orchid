@@ -60,6 +60,20 @@ defmodule Orchid.AgentSandboxTest do
       Agent.stop(agent_id)
     end
 
+    test "agent in host mode with project_id skips sandbox", %{project_id: project_id} do
+      {:ok, agent_id} = Agent.create(%{project_id: project_id, execution_mode: :host})
+      Process.sleep(100)
+      {:ok, state} = Agent.get_state(agent_id)
+
+      assert state.execution_mode == :host
+      assert state.sandbox == nil
+
+      {:ok, output} = Tool.execute("shell", %{"command" => "echo host-mode"}, %{agent_state: state})
+      assert String.trim(output) == "host-mode"
+
+      Agent.stop(agent_id)
+    end
+
     test "sandbox-aware tool dispatch routes shell through sandbox", %{project_id: project_id} do
       {:ok, agent_id} = Agent.create(%{project_id: project_id})
       state = await_sandbox(agent_id)

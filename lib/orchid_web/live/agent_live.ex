@@ -16,6 +16,7 @@ defmodule OrchidWeb.AgentLive do
       |> assign(:pending_message, nil)
       |> assign(:model, :opus)
       |> assign(:provider, :cli)
+      |> assign(:agent_execution_mode, :vm)
       |> assign(:projects, Orchid.Object.list_projects())
       |> assign(:project_query, "")
       |> assign(:current_project, nil)
@@ -196,6 +197,11 @@ defmodule OrchidWeb.AgentLive do
               do: Map.put(config, :model, template.metadata[:model]),
               else: config
 
+          config =
+            if is_list(template.metadata[:allowed_tools]),
+              do: Map.put(config, :allowed_tools, template.metadata[:allowed_tools]),
+              else: config
+
           if template.metadata[:use_orchid_tools],
             do: Map.put(config, :use_orchid_tools, true),
             else: config
@@ -211,6 +217,8 @@ defmodule OrchidWeb.AgentLive do
       else
         config
       end
+
+    config = Map.put(config, :execution_mode, socket.assigns.agent_execution_mode)
 
     {:ok, agent_id} = Orchid.Agent.create(config)
     {:noreply, push_patch(socket, to: "/agent/#{agent_id}")}
@@ -241,6 +249,10 @@ defmodule OrchidWeb.AgentLive do
 
   def handle_event("update_provider", %{"provider" => provider}, socket) do
     {:noreply, assign(socket, :provider, String.to_existing_atom(provider))}
+  end
+
+  def handle_event("update_agent_execution_mode", %{"mode" => mode}, socket) do
+    {:noreply, assign(socket, :agent_execution_mode, parse_agent_execution_mode(mode))}
   end
 
   # Template events
@@ -655,8 +667,10 @@ defmodule OrchidWeb.AgentLive do
           |> assign(:decomp_result, nil)
 
         Task.start(fn ->
+          llm_config = decomp_llm_config(model)
+
           raw_output =
-            case Orchid.LLM.Aletheia.generate_paths(objective, num_paths, %{model: model}) do
+            case Orchid.LLM.Aletheia.generate_paths(objective, num_paths, llm_config) do
               {:ok, [raw | _]} when is_binary(raw) -> raw
               {:ok, plans} when is_list(plans) -> Enum.join(plans, "\n\n---\n\n")
               {:error, reason} -> "Raw generation failed: #{inspect(reason)}"
@@ -666,7 +680,7 @@ defmodule OrchidWeb.AgentLive do
             num_paths: num_paths,
             max_iterations: max_iterations,
             project_id: project_id,
-            llm_config: %{provider: :cli, model: model}
+            llm_config: llm_config
           ]
 
           result =
@@ -1065,6 +1079,12 @@ defmodule OrchidWeb.AgentLive do
                   </select>
                 </form>
               <% end %>
+              <form phx-change="update_agent_execution_mode" style="display: inline;">
+                <select class="model-select" name="mode" title="Execution Mode">
+                  <option value="vm" selected={@agent_execution_mode == :vm}>VM</option>
+                  <option value="host" selected={@agent_execution_mode == :host}>Host</option>
+                </select>
+              </form>
               <a href="/prompts" class="btn btn-secondary" style="padding: 0.4rem 0.6rem;">Prompts</a>
               <a href="/settings" class="btn btn-secondary" style="padding: 0.4rem 0.6rem;">Settings</a>
               <button class="btn btn-secondary" phx-click="show_create_template" title="New Template" style="padding: 0.4rem 0.6rem;">+T</button>
@@ -1663,6 +1683,7 @@ defmodule OrchidWeb.AgentLive do
                           <option value="opus" selected={@decomp_model == :opus}>Opus</option>
                           <option value="sonnet" selected={@decomp_model == :sonnet}>Sonnet</option>
                           <option value="haiku" selected={@decomp_model == :haiku}>Haiku</option>
+                          <option value="gpt53" selected={@decomp_model == :gpt53}>GPT 5.3</option>
                           <option value="gemini_3_pro" selected={@decomp_model == :gemini_3_pro}>Gemini 3 Pro</option>
                           <option value="minimax_m2_5" selected={@decomp_model == :minimax_m2_5}>MiniMax M2.5</option>
                           <option value="glm_5" selected={@decomp_model == :glm_5}>GLM-5</option>
@@ -1747,12 +1768,20 @@ defmodule OrchidWeb.AgentLive do
                 Select an agent or create a new one to start chatting.
               <% end %>
             </p>
+            <p style="color: #8b949e; font-size: 0.8rem; margin-top: -0.5rem; margin-bottom: 0.8rem;">
+              New agent mode: <%= if @agent_execution_mode == :host, do: "Host", else: "VM" %>
+            </p>
             <div class="agent-list">
               <%= for agent <- filter_agents(@agents, @current_project) do %>
                 <div class="agent-card">
                   <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
                     <h3 style="margin: 0;"><%= agent.id %></h3>
-                    <div style={"padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; #{agent_status_style(agent.status)}"}><%= agent_status_label(agent.status) %></div>
+                    <div style="display: flex; gap: 0.4rem; align-items: center;">
+                      <div style={"padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; #{agent_status_style(agent.status)}"}><%= agent_status_label(agent.status) %></div>
+                      <span style={"font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 10px; #{agent_mode_style(agent.execution_mode)}"}>
+                        <%= agent_mode_label(agent.execution_mode) %>
+                      </span>
+                    </div>
                   </div>
                   <%= if agent.template do %>
                     <div style="color: #8b949e; font-size: 0.85rem;"><%= agent.template %></div>
@@ -1945,6 +1974,7 @@ defmodule OrchidWeb.AgentLive do
 
           status = state.status
           wait_status = wait_status_from_memory(state.memory)
+          execution_mode = state.execution_mode || :vm
 
           %{
             id: agent_id,
@@ -1952,7 +1982,8 @@ defmodule OrchidWeb.AgentLive do
             template: template_name,
             goal: goal_name,
             status: status,
-            wait_status: wait_status
+            wait_status: wait_status,
+            execution_mode: execution_mode
           }
 
         _ ->
@@ -1962,7 +1993,8 @@ defmodule OrchidWeb.AgentLive do
             template: nil,
             goal: nil,
             status: :unknown,
-            wait_status: nil
+            wait_status: nil,
+            execution_mode: :vm
           }
       end
     end)
@@ -2013,6 +2045,14 @@ defmodule OrchidWeb.AgentLive do
   defp sandbox_status_style(:starting), do: "background: #2d2000; color: #d29922;"
   defp sandbox_status_style(:error), do: "background: #3d1114; color: #f85149;"
   defp sandbox_status_style(_), do: "background: #21262d; color: #8b949e;"
+
+  defp agent_mode_label(:host), do: "Host"
+  defp agent_mode_label("host"), do: "Host"
+  defp agent_mode_label(_), do: "VM"
+
+  defp agent_mode_style(:host), do: "background: #3b2300; color: #ffb86b;"
+  defp agent_mode_style("host"), do: "background: #3b2300; color: #ffb86b;"
+  defp agent_mode_style(_), do: "background: #0b2d47; color: #79c0ff;"
 
   defp refresh_goals(socket) do
     case socket.assigns.current_project do
@@ -2255,11 +2295,19 @@ defmodule OrchidWeb.AgentLive do
   defp parse_decomp_model("opus"), do: :opus
   defp parse_decomp_model("sonnet"), do: :sonnet
   defp parse_decomp_model("haiku"), do: :haiku
+  defp parse_decomp_model("gpt53"), do: :gpt53
   defp parse_decomp_model("gemini_3_pro"), do: :gemini_3_pro
   defp parse_decomp_model("minimax_m2_5"), do: :minimax_m2_5
   defp parse_decomp_model("glm_5"), do: :glm_5
   defp parse_decomp_model("kimi_k2_5"), do: :kimi_k2_5
   defp parse_decomp_model(_), do: :sonnet
+
+  defp decomp_llm_config(:gpt53), do: %{provider: :codex, model: :gpt53}
+  defp decomp_llm_config(model), do: %{provider: :cli, model: model}
+
+  defp parse_agent_execution_mode("host"), do: :host
+  defp parse_agent_execution_mode("root_vm"), do: :host
+  defp parse_agent_execution_mode(_), do: :vm
 
   defp clamp_int(raw, default, min, max) when is_binary(raw) do
     case Integer.parse(raw) do

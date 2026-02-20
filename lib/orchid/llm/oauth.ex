@@ -157,7 +157,7 @@ defmodule Orchid.LLM.OAuth do
           end
       end
 
-    tools = format_tools()
+    tools = format_tools(config)
 
     %{
       model: model,
@@ -169,8 +169,8 @@ defmodule Orchid.LLM.OAuth do
     }
   end
 
-  defp format_tools do
-    Orchid.Tool.list_tools()
+  defp format_tools(config) do
+    Orchid.Tool.list_tools(config[:allowed_tools])
     |> Enum.map(fn tool ->
       %{
         name: tool.name,

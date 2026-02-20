@@ -6,8 +6,8 @@ defmodule Orchid.LLM.Aletheia do
   alias Orchid.{LLM, Project}
 
   @default_config %{
-    provider: :cli,
-    model: :sonnet,
+    provider: :codex,
+    model: :gpt53,
     disable_tools: true,
     max_turns: 1,
     max_tokens: 1_800
@@ -32,15 +32,7 @@ defmodule Orchid.LLM.Aletheia do
     """
 
     with {:ok, raw} <- llm_text(prompt, llm_config) do
-      text = String.trim(raw)
-
-      if text == "" do
-        {:error, "Model returned empty planning output"}
-      else
-        # Parsing disabled intentionally: return raw model output as-is.
-        # Planner can still run on this single path while GUI shows raw text.
-        {:ok, [text]}
-      end
+      parse_generated_paths(raw, num_paths)
     end
   end
 
@@ -190,6 +182,62 @@ defmodule Orchid.LLM.Aletheia do
 
     %{approved?: approved, feedback: feedback}
   end
+
+  defp parse_generated_paths(raw, num_paths) when is_binary(raw) and is_integer(num_paths) do
+    text = String.trim(raw)
+
+    if text == "" do
+      {:error, "Model returned empty planning output"}
+    else
+      with {:ok, decoded} <- decode_json_blob(text),
+           {:ok, plans} <- extract_paths(decoded, num_paths) do
+        {:ok, plans}
+      else
+        {:error, reason} ->
+          {:error, "Invalid planning JSON: #{reason}"}
+      end
+    end
+  end
+
+  defp decode_json_blob(text) do
+    case Jason.decode(text) do
+      {:ok, parsed} ->
+        {:ok, parsed}
+
+      _ ->
+        case Regex.run(~r/```(?:json)?\s*(\{.*\})\s*```/s, text, capture: :all_but_first) do
+          [json] ->
+            Jason.decode(json)
+
+          _ ->
+            case Regex.run(~r/\{.*\}/s, text) do
+              [json] -> Jason.decode(json)
+              _ -> {:error, :no_json_object_found}
+            end
+        end
+    end
+  end
+
+  defp extract_paths(%{"plans" => plans}, num_paths) when is_list(plans) do
+    normalized =
+      plans
+      |> Enum.map(fn
+        plan when is_binary(plan) -> String.trim(plan)
+        _ -> ""
+      end)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+      |> Enum.take(max(1, num_paths))
+
+    if normalized == [] do
+      {:error, "`plans` must include at least one non-empty string"}
+    else
+      {:ok, normalized}
+    end
+  end
+
+  defp extract_paths(%{"plans" => _}, _num_paths), do: {:error, "`plans` must be an array of strings"}
+  defp extract_paths(_decoded, _num_paths), do: {:error, "response must be a JSON object with key `plans`"}
 
   defp workspace_context(nil, _overlay), do: "(project not set)"
 

@@ -120,7 +120,7 @@ defmodule Orchid.LLM.Anthropic do
       end
 
     # Add tools if available
-    tools = Orchid.Tool.list_tools()
+    tools = Orchid.Tool.list_tools(config[:allowed_tools])
 
     if tools != [] do
       Map.put(body, :tools, format_tools(tools))

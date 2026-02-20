@@ -170,7 +170,7 @@ defmodule Orchid.LLM.Gemini do
       end
 
     # Add tools
-    tools = Orchid.Tool.list_tools()
+    tools = Orchid.Tool.list_tools(config[:allowed_tools])
 
     if tools != [] do
       gemini_tools =

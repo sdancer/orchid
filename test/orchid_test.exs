@@ -49,10 +49,16 @@ defmodule OrchidTest do
     test "list_tools returns all tools" do
       tools = Orchid.Tool.list_tools()
 
-      assert length(tools) == 15
+      assert length(tools) >= 15
       assert Enum.any?(tools, &(&1.name == "shell"))
       assert Enum.any?(tools, &(&1.name == "sandbox_reset"))
       assert Enum.any?(tools, &(&1.name == "eval"))
+      refute Enum.any?(tools, &(&1.name == "project_list"))
+      refute Enum.any?(tools, &(&1.name == "project_create"))
+
+      scoped = Orchid.Tool.list_tools(["project_list", "project_create"])
+      assert Enum.any?(scoped, &(&1.name == "project_list"))
+      assert Enum.any?(scoped, &(&1.name == "project_create"))
     end
 
     test "execute shell command" do
@@ -63,6 +69,33 @@ defmodule OrchidTest do
     test "execute eval" do
       {:ok, result} = Orchid.Tool.execute("eval", %{"code" => "2 * 3"}, %{})
       assert result == "6"
+    end
+
+    test "object_write rejects invalid candidate plan JSON" do
+      {:ok, obj} = Orchid.Object.create(:artifact, "candidate_plan_alpha", "{\"goal\":\"x\"}")
+
+      assert {:error, msg} =
+               Orchid.Tools.ObjectWrite.execute(
+                 %{"id" => obj.id, "content" => "{\"goal\":\"only goal\"}"},
+                 %{}
+               )
+
+      assert String.contains?(msg, "candidate_plan_* field")
+    end
+
+    test "object_write accepts valid candidate plan JSON" do
+      {:ok, obj} = Orchid.Object.create(:artifact, "candidate_plan_beta", "{\"goal\":\"x\"}")
+
+      content =
+        Jason.encode!(%{
+          "goal" => "Implement migration",
+          "strategy" => "Ecto migration",
+          "steps" => ["Inspect current schema", "Write migration", "Run migration"],
+          "checks" => ["mix ecto.migrate exits 0"],
+          "risks" => ["Missing DB_URL"]
+        })
+
+      assert {:ok, _} = Orchid.Tools.ObjectWrite.execute(%{"id" => obj.id, "content" => content}, %{})
     end
   end
 

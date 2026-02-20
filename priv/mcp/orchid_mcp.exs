@@ -6,6 +6,7 @@
 defmodule OrchidMCP do
   @node :"orchid@127.0.0.1"
   @log_file Path.expand("priv/data/mcp.log", __DIR__ |> Path.join("../.."))
+  @template_scoped_tools ~w(project_list project_create)
 
   def main(args) do
     project_id = Enum.at(args, 0)
@@ -110,11 +111,18 @@ defmodule OrchidMCP do
      }}
   end
 
-  defp handle_method("tools/list", _params, _state) do
-    {:ok, %{"tools" => tools()}}
+  defp handle_method("tools/list", _params, state) do
+    {:ok, %{"tools" => tools_for_state(state)}}
   end
 
   defp handle_method("tools/call", %{"name" => name, "arguments" => args} = params, state) do
+    if not tool_allowed?(state, name) do
+      {:ok,
+       %{
+         "content" => [%{"type" => "text", "text" => "Error: tool not allowed for this agent: #{name}"}],
+         "isError" => true
+       }}
+    else
     started = System.monotonic_time(:millisecond)
     request_id = Map.get(params, "request_id")
     log("TOOL CALL: #{name}(#{inspect(args) |> String.slice(0, 300)})")
@@ -137,6 +145,7 @@ defmodule OrchidMCP do
            "content" => [%{"type" => "text", "text" => "Error: #{inspect(err)}"}],
            "isError" => true
          }}
+    end
     end
   end
 
@@ -291,6 +300,22 @@ defmodule OrchidMCP do
               "description" => "Initial message (only if no goal_id)"
             }
           }
+        }
+      },
+      %{
+        "name" => "project_list",
+        "description" => "List all Orchid projects with name and files location",
+        "inputSchema" => %{"type" => "object", "properties" => %{}}
+      },
+      %{
+        "name" => "project_create",
+        "description" => "Create a new Orchid project",
+        "inputSchema" => %{
+          "type" => "object",
+          "properties" => %{
+            "name" => %{"type" => "string", "description" => "Project name"}
+          },
+          "required" => ["name"]
         }
       },
       %{
@@ -648,6 +673,46 @@ defmodule OrchidMCP do
     end
   end
 
+  defp execute_tool("project_list", _args, _state) do
+    projects = :rpc.call(@node, Orchid.Object, :list_projects, [])
+
+    if is_list(projects) do
+      text =
+        case projects do
+          [] ->
+            "No projects found."
+
+          _ ->
+            Enum.map_join(projects, "\n\n", fn p ->
+              status = p.metadata[:status] || :active
+              files_path = :rpc.call(@node, Orchid.Project, :files_path, [p.id])
+              "[#{status}] #{p.name} (#{p.id})\nfiles: #{files_path}"
+            end)
+        end
+
+      {:ok, text}
+    else
+      {:error, "RPC failed listing projects: #{inspect(projects)}"}
+    end
+  end
+
+  defp execute_tool("project_create", %{"name" => raw_name}, _state) do
+    name = to_string(raw_name) |> String.trim()
+
+    if name == "" do
+      {:error, "project_create requires a non-empty name"}
+    else
+      case :rpc.call(@node, Orchid.Projects, :create, [name]) do
+        {:ok, project} ->
+          files_path = :rpc.call(@node, Orchid.Project, :files_path, [project.id])
+          {:ok, "Created project: #{project.name} (#{project.id})\nfiles: #{files_path}"}
+
+        error ->
+          {:error, "Failed to create project: #{inspect(error)}"}
+      end
+    end
+  end
+
   defp execute_tool("active_agents", _args, state) do
     agents = :rpc.call(@node, Orchid.Agent, :list, [])
     goals = :rpc.call(@node, Orchid.Object, :list_goals_for_project, [state.project_id])
@@ -791,6 +856,36 @@ defmodule OrchidMCP do
     case :rpc.call(@node, Orchid.Object, :get, [template_id]) do
       {:ok, t} -> t.name
       _ -> template_id
+    end
+  end
+
+  defp tools_for_state(state) do
+    all = tools()
+
+    case allowed_tools_for_agent(state.agent_id) do
+      nil ->
+        Enum.reject(all, fn t -> t["name"] in @template_scoped_tools end)
+
+      allowed when is_list(allowed) ->
+        allowed_set = MapSet.new(Enum.map(allowed, &to_string/1))
+        Enum.filter(all, fn t -> MapSet.member?(allowed_set, t["name"]) end)
+    end
+  end
+
+  defp tool_allowed?(state, tool_name) do
+    case allowed_tools_for_agent(state.agent_id) do
+      nil -> to_string(tool_name) not in @template_scoped_tools
+      allowed when is_list(allowed) -> to_string(tool_name) in Enum.map(allowed, &to_string/1)
+      _ -> true
+    end
+  end
+
+  defp allowed_tools_for_agent(nil), do: nil
+
+  defp allowed_tools_for_agent(agent_id) do
+    case :rpc.call(@node, Orchid.Agent, :get_state, [agent_id]) do
+      {:ok, s} -> s.config[:allowed_tools]
+      _ -> nil
     end
   end
 

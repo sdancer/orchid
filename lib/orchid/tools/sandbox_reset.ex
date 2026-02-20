@@ -19,9 +19,18 @@ defmodule Orchid.Tools.SandboxReset do
 
   @impl true
   def execute(_args, %{agent_state: state}) do
-    case Orchid.Sandbox.reset(state.project_id) do
-      {:ok, status} -> {:ok, "Sandbox reset. Status: #{inspect(status)}"}
-      {:error, reason} -> {:error, "Failed to reset sandbox: #{inspect(reason)}"}
+    cond do
+      is_nil(state.project_id) ->
+        {:error, "No project sandbox to reset."}
+
+      state[:execution_mode] in [:host, "host", :root_vm, "root_vm"] ->
+        {:error, "Sandbox is disabled for this agent (host mode)."}
+
+      true ->
+        case Orchid.Sandbox.reset(state.project_id) do
+          {:ok, status} -> {:ok, "Sandbox reset. Status: #{inspect(status)}"}
+          {:error, reason} -> {:error, "Failed to reset sandbox: #{inspect(reason)}"}
+        end
     end
   end
 

@@ -187,6 +187,7 @@ defmodule Orchid.LLM.Codex do
 
   defp build_args(config, prompt) do
     args = ["exec", "--json"]
+    run_in_container = run_in_container?(config)
 
     # Model
     args = case config[:model] do
@@ -201,13 +202,18 @@ defmodule Orchid.LLM.Codex do
       nil -> args
       project_id ->
         workspace =
-          if config[:use_orchid_tools] do
+          cond do
+            config[:use_orchid_tools] ->
+              Orchid.Project.files_path(project_id) |> Path.expand()
+
+            run_in_container ->
+              "/workspace"
+
+            true ->
             Orchid.Project.files_path(project_id) |> Path.expand()
-          else
-            "/workspace"
           end
 
-        if config[:use_orchid_tools], do: File.mkdir_p!(workspace)
+        if config[:use_orchid_tools] or not run_in_container, do: File.mkdir_p!(workspace)
         args ++ ["-C", workspace]
     end
 
@@ -216,7 +222,7 @@ defmodule Orchid.LLM.Codex do
     #   so shell commands use container networking/filesystem directly.
     # - Orchestrators keep Codex full-auto behavior.
     args =
-      if config[:project_id] && !config[:use_orchid_tools] do
+      if run_in_container do
         args ++ ["--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
       else
         args ++ ["--full-auto"]
@@ -236,6 +242,7 @@ defmodule Orchid.LLM.Codex do
   defp build_shell_command(args, config) do
     codex_path = System.find_executable("codex") || "codex"
     escaped_args = Enum.map(args, &shell_escape/1)
+    run_in_container = run_in_container?(config)
 
     cond do
       # Orchestrator: run on host with Orchid MCP tools
@@ -243,11 +250,15 @@ defmodule Orchid.LLM.Codex do
         codex_home = setup_orchestrator_home(config[:project_id], config[:agent_id])
         "CODEX_HOME=#{shell_escape(codex_home)} #{codex_path} #{Enum.join(escaped_args, " ")} 2>&1"
 
-      # Worker agent: run inside sandbox container for isolation.
-      config[:project_id] ->
+      # Worker agent in VM mode: run inside sandbox container for isolation.
+      config[:project_id] && run_in_container ->
         container = "orchid-project-#{config[:project_id]}"
         inner_cmd = "cd /workspace && codex #{Enum.join(escaped_args, " ")}"
         "podman exec #{container} sh -c #{shell_escape(inner_cmd)} 2>&1"
+
+      # Worker agent in host mode: run on host.
+      config[:project_id] ->
+        "#{codex_path} #{Enum.join(escaped_args, " ")} 2>&1"
 
       # No project: run on host
       true ->
@@ -304,5 +315,10 @@ defmodule Orchid.LLM.Codex do
   defp shell_escape(arg) do
     escaped = String.replace(arg, "'", "'\\''")
     "'#{escaped}'"
+  end
+
+  defp run_in_container?(config) do
+    mode = config[:execution_mode]
+    config[:project_id] && !config[:use_orchid_tools] && mode not in [:host, "host", :root_vm, "root_vm"]
   end
 end

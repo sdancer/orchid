@@ -130,7 +130,7 @@ defmodule Orchid.LLM.OpenRouter do
     if config[:disable_tools] do
       body
     else
-      tools = Orchid.Tool.list_tools()
+      tools = Orchid.Tool.list_tools(config[:allowed_tools])
 
       if tools != [] do
         openai_tools = format_tools(tools)
