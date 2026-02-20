@@ -1,13 +1,14 @@
 defmodule Orchid.GoalWatcher do
   @moduledoc """
   Periodically checks for projects that have pending goals but no running agents.
-  Spawns a Planner agent per project to orchestrate goals.
+  Executes ready root goals with NodeServer when no project agents are active.
   Also detects dead agents (assigned to goals but no longer running) and
   re-kicks idle agents that still have unfinished work.
   """
   use GenServer
   require Logger
   alias Orchid.LLM
+  alias Orchid.Goals
 
   @interval :timer.seconds(10)
   @log_file "priv/data/goal_watcher.log"
@@ -25,7 +26,26 @@ defmodule Orchid.GoalWatcher do
     log("started, checking every #{div(@interval, 1000)}s")
     schedule()
     # kicked_agents: %{agent_id => last_kick_time}
-    {:ok, %{kicked_agents: %{}}}
+    # node_runs: %{goal_id => %{pid: pid, monitor_ref: ref, project_id: project_id}}
+    {:ok, %{kicked_agents: %{}, node_runs: %{}}}
+  end
+
+  @impl true
+  def handle_info({:child_success, goal_id, completed_tasks}, state) when is_binary(goal_id) do
+    state = finish_node_goal(goal_id, completed_tasks, state)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    case Enum.find(state.node_runs, fn {_goal_id, run} -> run.monitor_ref == ref end) do
+      nil ->
+        {:noreply, state}
+
+      {goal_id, _run} ->
+        state = handle_node_down(goal_id, reason, state)
+        {:noreply, state}
+    end
   end
 
   @impl true
@@ -55,6 +75,7 @@ defmodule Orchid.GoalWatcher do
   end
 
   defp check_projects(state) do
+    state = cleanup_dead_node_runs(state)
     projects = Orchid.Object.list_projects()
     running_agent_ids = MapSet.new(Orchid.Agent.list())
 
@@ -114,26 +135,78 @@ defmodule Orchid.GoalWatcher do
           Map.reject(state.kicked_agents, fn {id, _} -> id not in running_agent_ids end)
     }
 
-    # 2. No agents at all → spawn planner
+    # 2. No agents at all -> execute ready root goals with NodeServer
     if project_agents == [] do
-      # Re-fetch pending goals with cleared assignments
-      pending =
-        if orphaned != [] do
-          Orchid.Object.list_goals_for_project(project.id)
-          |> Enum.filter(fn g -> g.metadata[:status] != :completed end)
-        else
-          pending_goals
-        end
-
-      log(
-        "project \"#{project.name}\" has #{length(pending)} pending goal(s), 0 agents — spawning planner"
-      )
-
-      spawn_planner(project, pending)
-      state
+      run_root_nodes(project, state)
     else
       # 3. Has idle agents with pending assigned goals → re-kick (with cooldown)
       re_kick_idle_agents(project, project_agents, state)
+    end
+  end
+
+  defp run_root_nodes(project, state) do
+    root_goals =
+      project.id
+      |> Goals.list_ready_root_goals()
+      |> Enum.reject(fn g -> Map.has_key?(state.node_runs, g.id) end)
+
+    if root_goals == [] do
+      state
+    else
+      log(
+        "project \"#{project.name}\" has #{length(root_goals)} ready root goal(s), 0 agents — starting NodeServer"
+      )
+
+      case Orchid.Projects.ensure_sandbox(project.id) do
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          log("WARNING: sandbox failed for project \"#{project.name}\": #{inspect(reason)}")
+      end
+
+      Enum.reduce(root_goals, state, fn goal, acc ->
+        start_root_node(project, goal, acc)
+      end)
+    end
+  end
+
+  defp start_root_node(project, goal, state) do
+    objective = root_goal_objective(goal)
+
+    tool_context = %{
+      agent_state: %{
+        id: "node_#{goal.id}",
+        project_id: project.id,
+        execution_mode: :vm,
+        sandbox: Orchid.Sandbox.status(project.id),
+        config: %{}
+      }
+    }
+
+    opts = [
+      id: goal.id,
+      parent_pid: self(),
+      objective: objective,
+      tool_context: tool_context
+    ]
+
+    case DynamicSupervisor.start_child(
+           Orchid.Agent.NodeSupervisor,
+           {Orchid.Agent.NodeServer, opts}
+         ) do
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+        Orchid.Object.update_metadata(goal.id, %{status: :in_progress, node_pid: inspect(pid)})
+        log("  started node for root goal \"#{goal.name}\" [#{goal.id}] pid=#{inspect(pid)}")
+        put_in(state.node_runs[goal.id], %{pid: pid, monitor_ref: ref, project_id: project.id})
+
+      {:error, reason} ->
+        log(
+          "ERROR: failed to start node for goal \"#{goal.name}\" [#{goal.id}]: #{inspect(reason)}"
+        )
+
+        state
     end
   end
 
@@ -206,103 +279,6 @@ defmodule Orchid.GoalWatcher do
     end)
   end
 
-  defp spawn_planner(project, pending_goals) do
-    case find_planner_template() do
-      nil ->
-        log("ERROR: no Planner template found, skipping project \"#{project.name}\"")
-
-      planner ->
-        # Build goal summary for system prompt interpolation
-        goal_summary =
-          pending_goals
-          |> Enum.map(fn g ->
-            deps = g.metadata[:depends_on] || []
-            dep_str = if deps == [], do: "", else: " (depends on: #{Enum.join(deps, ", ")})"
-            desc_str = if g.content != "", do: "\n  #{g.content}", else: ""
-            "- #{g.name} [#{g.id}]#{dep_str}#{desc_str}"
-          end)
-          |> Enum.join("\n")
-
-        # Substitute placeholders in the template system prompt
-        system_prompt =
-          planner.content
-          |> String.replace("{project name}", project.name)
-          |> String.replace("{goals list}", goal_summary)
-
-        # Ensure sandbox is running before spawning agent
-        case Orchid.Projects.ensure_sandbox(project.id) do
-          {:ok, _} ->
-            log("sandbox ready for project \"#{project.name}\"")
-
-          {:error, reason} ->
-            log("WARNING: sandbox failed for project \"#{project.name}\": #{inspect(reason)}")
-        end
-
-        config = %{
-          provider: planner.metadata[:provider] || :cli,
-          system_prompt: system_prompt,
-          template_id: planner.id,
-          project_id: project.id
-        }
-
-        config =
-          if planner.metadata[:model],
-            do: Map.put(config, :model, planner.metadata[:model]),
-            else: config
-
-        config =
-          if is_list(planner.metadata[:allowed_tools]),
-            do: Map.put(config, :allowed_tools, planner.metadata[:allowed_tools]),
-            else: config
-
-        config =
-          if planner.metadata[:use_orchid_tools],
-            do: Map.put(config, :use_orchid_tools, true),
-            else: config
-
-        case Orchid.Agent.create(config) do
-          {:ok, agent_id} ->
-            log("spawned planner #{agent_id} for project \"#{project.name}\"")
-
-            # Assign all unassigned goals to this planner
-            for goal <- pending_goals, is_nil(goal.metadata[:agent_id]) do
-              Orchid.Object.update_metadata(goal.id, %{agent_id: agent_id})
-              log("  assigned goal \"#{goal.name}\" [#{goal.id}] -> #{agent_id}")
-            end
-
-            message = """
-            Begin your Standard Operating Procedure now. Inspect the workspace, synchronize with the goal registry, and execute.
-            """
-
-            Task.start(fn ->
-              log("streaming kickoff to planner #{agent_id}...")
-
-              result =
-                Orchid.Agent.stream(agent_id, String.trim(message), fn _chunk -> :ok end)
-
-              case result do
-                {:ok, response} ->
-                  preview = response |> String.slice(0, 200) |> String.replace("\n", " ")
-                  log("planner #{agent_id} responded: #{preview}")
-
-                {:error, reason} ->
-                  log("ERROR: planner #{agent_id} stream failed: #{inspect(reason)}")
-              end
-            end)
-
-            log("sent kickoff message to #{agent_id}")
-
-          {:error, reason} ->
-            log("ERROR: failed to spawn agent for \"#{project.name}\": #{inspect(reason)}")
-        end
-    end
-  end
-
-  defp find_planner_template do
-    Orchid.Object.list_agent_templates()
-    |> Enum.find(fn t -> t.name == "Planner" end)
-  end
-
   # Short tag for log lines: "TemplateName/provider"
   defp agent_tag(agent_state) do
     provider = agent_state.config[:provider] || "?"
@@ -321,6 +297,86 @@ defmodule Orchid.GoalWatcher do
       end
 
     tname || "#{provider}#{if model, do: "/#{model}", else: ""}"
+  end
+
+  defp finish_node_goal(goal_id, completed_tasks, state) do
+    case Map.pop(state.node_runs, goal_id) do
+      {nil, _remaining} ->
+        state
+
+      {run, remaining} ->
+        Process.demonitor(run.monitor_ref, [:flush])
+        report = node_report(completed_tasks)
+
+        _ =
+          Orchid.Object.update_metadata(goal_id, %{
+            completion_summary: "Completed by NodeServer",
+            report: report,
+            task_outcome: "success",
+            reported_by_tool: false,
+            reported_at: DateTime.utc_now(),
+            node_pid: nil
+          })
+
+        _ = Goals.set_status(goal_id, :completed)
+        log("node completed root goal [#{goal_id}]")
+        %{state | node_runs: remaining}
+    end
+  end
+
+  defp handle_node_down(goal_id, reason, state) do
+    case Map.pop(state.node_runs, goal_id) do
+      {nil, _remaining} ->
+        state
+
+      {run, remaining} ->
+        Process.demonitor(run.monitor_ref, [:flush])
+
+        if reason != :normal do
+          _ =
+            Orchid.Object.update_metadata(goal_id, %{
+              status: :pending,
+              last_error: "NodeServer exited: #{inspect(reason)}",
+              node_pid: nil
+            })
+
+          log("node exited abnormally for goal [#{goal_id}]: #{inspect(reason)}")
+        end
+
+        %{state | node_runs: remaining}
+    end
+  end
+
+  defp cleanup_dead_node_runs(state) do
+    Enum.reduce(state.node_runs, state, fn {goal_id, run}, acc ->
+      if Process.alive?(run.pid) do
+        acc
+      else
+        %{acc | node_runs: Map.delete(acc.node_runs, goal_id)}
+      end
+    end)
+  end
+
+  defp root_goal_objective(goal) do
+    details =
+      if is_binary(goal.content) and String.trim(goal.content) != "" do
+        "\n\nDetails:\n#{goal.content}"
+      else
+        ""
+      end
+
+    "Execute root goal: #{goal.name} (#{goal.id})#{details}"
+  end
+
+  defp node_report(completed_tasks) do
+    lines =
+      Enum.map(completed_tasks, fn entry ->
+        task_id = entry[:task_id] || "unknown_task"
+        result = entry[:result]
+        "- #{task_id}: #{inspect(result)}"
+      end)
+
+    Enum.join(lines, "\n")
   end
 
   defp log(msg) do

@@ -15,6 +15,8 @@ defmodule Orchid.Application do
       {Registry, keys: :unique, name: Orchid.Registry},
       # DynamicSupervisor for agent processes
       {DynamicSupervisor, strategy: :one_for_one, name: Orchid.AgentSupervisor},
+      # DynamicSupervisor for hierarchical node execution
+      Orchid.Agent.NodeSupervisor,
       # Serialized completion-review queue to avoid reviewer call floods
       Orchid.GoalReviewQueue,
       # MCP call event stream for GUI attribution

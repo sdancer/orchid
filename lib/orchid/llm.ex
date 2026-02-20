@@ -56,8 +56,22 @@ defmodule Orchid.LLM do
     end
   end
 
-  @gemini_models [:gemini_pro, :gemini_flash, :gemini_flash_image, :gemini_3_flash, :gemini_3_pro]
-  @cerebras_models [:llama_3_1_8b, :llama_3_3_70b, :gpt_oss_120b, :qwen_3_32b, :qwen_3_235b, :zai_glm_4_7]
+  @gemini_models [
+    :gemini_pro,
+    :gemini_flash,
+    :gemini_flash_image,
+    :gemini_3_flash,
+    :gemini_3_pro,
+    :gemini_3_1_pro_preview
+  ]
+  @cerebras_models [
+    :llama_3_1_8b,
+    :llama_3_3_70b,
+    :gpt_oss_120b,
+    :qwen_3_32b,
+    :qwen_3_235b,
+    :zai_glm_4_7
+  ]
   @openrouter_models [:minimax_m2_5, :glm_5, :kimi_k2_5]
 
   defp resolve_provider(config) do

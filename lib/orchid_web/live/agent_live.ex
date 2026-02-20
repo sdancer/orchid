@@ -8,6 +8,7 @@ defmodule OrchidWeb.AgentLive do
     socket =
       socket
       |> assign(:agents, list_agents_with_info())
+      |> assign(:node_workers, list_node_workers_with_info())
       |> assign(:current_agent, agent_id)
       |> assign(:messages, [])
       |> assign(:input, "")
@@ -93,7 +94,7 @@ defmodule OrchidWeb.AgentLive do
 
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Orchid.PubSub, "mcp_calls")
-      Process.send_after(self(), :poll_agent_status, 2000)
+      Process.send_after(self(), :poll_agent_status, 1000)
     end
 
     {:ok, socket}
@@ -113,6 +114,7 @@ defmodule OrchidWeb.AgentLive do
       socket
       |> assign(:current_agent, agent_id)
       |> assign(:agents, list_agents_with_info())
+      |> assign(:node_workers, list_node_workers_with_info())
 
     socket =
       if agent_id do
@@ -396,6 +398,7 @@ defmodule OrchidWeb.AgentLive do
     {:noreply,
      socket
      |> assign(:current_project, id)
+     |> assign(:node_workers, list_node_workers_with_info())
      |> assign(:project_tab, :goals)
      |> assign(:goals, Orchid.Goals.list_for_project(id))
      |> assign(:mcp_calls, recent_mcp_calls(id, 40))
@@ -408,6 +411,7 @@ defmodule OrchidWeb.AgentLive do
     {:noreply,
      socket
      |> assign(:current_project, nil)
+     |> assign(:node_workers, list_node_workers_with_info())
      |> assign(:goals, [])
      |> assign(:mcp_calls, recent_mcp_calls(nil, 40))}
   end
@@ -640,7 +644,9 @@ defmodule OrchidWeb.AgentLive do
     objective = String.trim(params["goal"] || socket.assigns.decomp_goal_text || "")
     model = parse_decomp_model(params["model"] || Atom.to_string(socket.assigns.decomp_model))
     num_paths = clamp_int(params["num_paths"], socket.assigns.decomp_num_paths, 1, 8)
-    max_iterations = clamp_int(params["max_iterations"], socket.assigns.decomp_max_iterations, 0, 6)
+
+    max_iterations =
+      clamp_int(params["max_iterations"], socket.assigns.decomp_max_iterations, 0, 6)
 
     cond do
       socket.assigns.decomp_running ->
@@ -693,7 +699,12 @@ defmodule OrchidWeb.AgentLive do
             end
 
           duration_ms = System.monotonic_time(:millisecond) - started_ms
-          send(pid, {:decomposition_test_done, result, raw_output, duration_ms, model, num_paths, max_iterations})
+
+          send(
+            pid,
+            {:decomposition_test_done, result, raw_output, duration_ms, model, num_paths,
+             max_iterations}
+          )
         end)
 
         {:noreply, socket}
@@ -875,6 +886,7 @@ defmodule OrchidWeb.AgentLive do
     socket =
       socket
       |> assign(:agents, list_agents_with_info())
+      |> assign(:node_workers, list_node_workers_with_info())
       |> then(fn s ->
         if s.assigns.current_agent == id do
           push_patch(s, to: "/")
@@ -902,7 +914,8 @@ defmodule OrchidWeb.AgentLive do
   end
 
   def handle_info(
-        {:decomposition_test_done, result, raw_output, duration_ms, model, num_paths, max_iterations},
+        {:decomposition_test_done, result, raw_output, duration_ms, model, num_paths,
+         max_iterations},
         socket
       ) do
     socket =
@@ -964,10 +977,11 @@ defmodule OrchidWeb.AgentLive do
     socket =
       socket
       |> assign(:agents, list_agents_with_info())
+      |> assign(:node_workers, list_node_workers_with_info())
       |> refresh_sandbox_statuses()
       |> refresh_goals()
 
-    Process.send_after(self(), :poll_agent_status, 2000)
+    Process.send_after(self(), :poll_agent_status, 1000)
     {:noreply, socket}
   end
 
@@ -1809,6 +1823,57 @@ defmodule OrchidWeb.AgentLive do
                 <p style="color: #8b949e;">No active agents. Create one to get started.</p>
               <% end %>
             </div>
+
+            <h3 style="color: #c9d1d9; margin: 1rem 0 0.5rem;">Node Workers</h3>
+            <p style="color: #8b949e; font-size: 0.8rem; margin-bottom: 0.8rem;">
+              Root-goal workers managed by `NodeServer`.
+            </p>
+            <% active_workers = filter_node_workers(@node_workers, @current_project) %>
+            <div class="agent-list">
+              <%= for worker <- active_workers do %>
+                <div class="agent-card">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+                    <h3 style="margin: 0;"><%= worker.id %></h3>
+                    <div style={"padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; #{node_status_style(worker.status)}"}><%= node_status_label(worker.status) %></div>
+                  </div>
+                  <div style="color: #8b949e; font-size: 0.8rem; margin-bottom: 0.25rem;">PID: <%= inspect(worker.pid) %></div>
+                  <%= if worker.depth do %>
+                    <div style="color: #8b949e; font-size: 0.8rem; margin-bottom: 0.25rem;">Depth: <%= worker.depth %></div>
+                  <% end %>
+                  <%= if worker.objective do %>
+                    <div style="color: #c9d1d9; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title={worker.objective}>
+                      <%= worker.objective %>
+                    </div>
+                  <% end %>
+                  <%= if worker.project_id && !@current_project do %>
+                    <div class="agent-project" style="margin-top: 0.25rem;">
+                      <span class="project-badge"><%= get_project_name(@projects, worker.project_id) %></span>
+                    </div>
+                  <% end %>
+                </div>
+              <% end %>
+              <%= if active_workers == [] do %>
+                <p style="color: #8b949e;">No active node workers.</p>
+              <% end %>
+            </div>
+            <%= if @current_project do %>
+              <% recent = recent_node_runs(@goals) %>
+              <%= if recent != [] do %>
+                <div style="margin-top: 0.8rem; color: #8b949e; font-size: 0.8rem;">Recent Node Runs</div>
+                <div class="agent-list" style="margin-top: 0.4rem;">
+                  <%= for run <- recent do %>
+                    <div class="agent-card">
+                      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.2rem;">
+                        <h3 style="margin: 0;"><%= run.goal_name %></h3>
+                        <div style={"padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; #{node_status_style(run.status)}"}><%= node_status_label(run.status) %></div>
+                      </div>
+                      <div style="color: #8b949e; font-size: 0.8rem;">Goal: <%= run.goal_id %></div>
+                      <div style="color: #8b949e; font-size: 0.8rem; margin-top: 0.2rem;">Finished: <%= short_time(run.reported_at) %></div>
+                    </div>
+                  <% end %>
+                </div>
+              <% end %>
+            <% end %>
           <% end %>
         </div>
       </div>
@@ -2000,6 +2065,10 @@ defmodule OrchidWeb.AgentLive do
     end)
   end
 
+  defp list_node_workers_with_info do
+    Orchid.Agent.NodeWorker.list()
+  end
+
   defp wait_status_from_memory(memory) when is_map(memory) do
     case Map.get(memory, "wait_status") || Map.get(memory, :wait_status) do
       msg when is_binary(msg) and msg != "" -> msg
@@ -2068,6 +2137,52 @@ defmodule OrchidWeb.AgentLive do
       agent.project_id == current_project
     end)
   end
+
+  defp filter_node_workers(workers, nil), do: workers
+
+  defp filter_node_workers(workers, current_project) do
+    Enum.filter(workers, fn worker ->
+      worker.project_id == current_project
+    end)
+  end
+
+  defp recent_node_runs(goals) when is_list(goals) do
+    goals
+    |> Enum.filter(fn g ->
+      g.metadata[:reported_by_tool] == false and
+        is_binary(g.metadata[:completion_summary]) and
+        String.contains?(g.metadata[:completion_summary], "NodeServer")
+    end)
+    |> Enum.sort_by(
+      fn g -> g.metadata[:reported_at] || ~U[1970-01-01 00:00:00Z] end,
+      &(DateTime.compare(&1, &2) != :lt)
+    )
+    |> Enum.take(8)
+    |> Enum.map(fn g ->
+      %{
+        goal_id: g.id,
+        goal_name: g.name,
+        status: g.metadata[:status] || :completed,
+        reported_at: g.metadata[:reported_at]
+      }
+    end)
+  end
+
+  defp node_status_label(:init), do: "Init"
+  defp node_status_label(:verifying), do: "Verifying"
+  defp node_status_label(:executing), do: "Executing"
+  defp node_status_label(:replanning), do: "Replanning"
+
+  defp node_status_label(status) when is_atom(status),
+    do: status |> Atom.to_string() |> String.capitalize()
+
+  defp node_status_label(_), do: "Active"
+
+  defp node_status_style(:init), do: "background: #21262d; color: #8b949e;"
+  defp node_status_style(:verifying), do: "background: #0c2d6b; color: #58a6ff;"
+  defp node_status_style(:executing), do: "background: #0e2a15; color: #7ee787;"
+  defp node_status_style(:replanning), do: "background: #2d2000; color: #d29922;"
+  defp node_status_style(_), do: "background: #21262d; color: #8b949e;"
 
   defp filter_visible_goals(goals, false), do: goals
 
@@ -2316,7 +2431,8 @@ defmodule OrchidWeb.AgentLive do
     end
   end
 
-  defp clamp_int(v, _default, min, max) when is_integer(v), do: v |> Kernel.max(min) |> Kernel.min(max)
-  defp clamp_int(_v, default, _min, _max), do: default
+  defp clamp_int(v, _default, min, max) when is_integer(v),
+    do: v |> Kernel.max(min) |> Kernel.min(max)
 
+  defp clamp_int(_v, default, _min, _max), do: default
 end

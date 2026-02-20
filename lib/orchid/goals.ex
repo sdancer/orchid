@@ -11,12 +11,30 @@ defmodule Orchid.Goals do
     Object.list_goals_for_project(project_id)
   end
 
+  @doc """
+  List root goals (no parent) that are ready to execute.
+  A goal is ready when:
+  - status is not :completed
+  - parent_goal_id is nil
+  - all `depends_on` goals are completed
+  """
+  def list_ready_root_goals(project_id) do
+    goals = list_for_project(project_id)
+    by_id = Map.new(goals, &{&1.id, &1})
+
+    Enum.filter(goals, fn g ->
+      g.metadata[:status] != :completed and
+        is_nil(g.metadata[:parent_goal_id]) and
+        dependencies_completed?(g, by_id)
+    end)
+  end
+
   @doc "Create a goal in a project."
   def create(name, description, project_id, opts \\ []) do
     metadata = %{
       project_id: project_id,
       status: :pending,
-      depends_on: [],
+      depends_on: opts[:depends_on] || [],
       parent_goal_id: opts[:parent_goal_id]
     }
 
@@ -120,8 +138,12 @@ defmodule Orchid.Goals do
          {:ok, parent} <- Object.get(parent_id),
          orchestrator_id when not is_nil(orchestrator_id) <- parent.metadata[:agent_id] do
       report = goal.metadata[:report]
-      report_section = if report, do: "\n\nAgent report:\n#{String.slice(report, 0, 2000)}", else: ""
-      message = "Goal completed: \"#{goal.name}\" [#{goal_id}].#{report_section}\n\nCheck `goal_list` for updated state and continue with the next steps."
+
+      report_section =
+        if report, do: "\n\nAgent report:\n#{String.slice(report, 0, 2000)}", else: ""
+
+      message =
+        "Goal completed: \"#{goal.name}\" [#{goal_id}].#{report_section}\n\nCheck `goal_list` for updated state and continue with the next steps."
 
       Orchid.Agent.notify(orchestrator_id, message)
     else
@@ -153,5 +175,16 @@ defmodule Orchid.Goals do
       error ->
         error
     end
+  end
+
+  defp dependencies_completed?(goal, by_id) do
+    deps = goal.metadata[:depends_on] || []
+
+    Enum.all?(deps, fn dep_id ->
+      case Map.get(by_id, dep_id) do
+        nil -> false
+        dep -> dep.metadata[:status] == :completed
+      end
+    end)
   end
 end

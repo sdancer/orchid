@@ -95,7 +95,8 @@ defmodule OrchidTest do
           "risks" => ["Missing DB_URL"]
         })
 
-      assert {:ok, _} = Orchid.Tools.ObjectWrite.execute(%{"id" => obj.id, "content" => content}, %{})
+      assert {:ok, _} =
+               Orchid.Tools.ObjectWrite.execute(%{"id" => obj.id, "content" => content}, %{})
     end
   end
 
@@ -140,6 +141,28 @@ defmodule OrchidTest do
 
       agents = Orchid.Agent.list()
       refute agent_id in agents
+    end
+  end
+
+  describe "Goals" do
+    test "list_ready_root_goals returns only root goals with completed dependencies" do
+      {:ok, project} = Orchid.Projects.create("root-goal-test")
+
+      {:ok, dep} = Orchid.Goals.create("dep", "", project.id)
+
+      {:ok, root_waiting} =
+        Orchid.Goals.create("root waiting", "", project.id, depends_on: [dep.id])
+
+      {:ok, ready_root} = Orchid.Goals.create("ready root", "", project.id)
+      {:ok, _child} = Orchid.Goals.create("child", "", project.id, parent_goal_id: ready_root.id)
+
+      ready_before = Orchid.Goals.list_ready_root_goals(project.id)
+      assert Enum.any?(ready_before, &(&1.id == ready_root.id))
+      refute Enum.any?(ready_before, &(&1.id == root_waiting.id))
+
+      {:ok, _} = Orchid.Goals.set_status(dep.id, :completed)
+      ready_after = Orchid.Goals.list_ready_root_goals(project.id)
+      assert Enum.any?(ready_after, &(&1.id == root_waiting.id))
     end
   end
 end
