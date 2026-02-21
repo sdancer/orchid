@@ -40,7 +40,7 @@ defmodule Orchid.Tools.Shell do
         {:ok, output}
 
       {:ok, {output, exit_code}} ->
-        {:ok, "Exit code #{exit_code}:\n#{output}"}
+        {:error, "Exit code #{exit_code}:\n#{output}"}
 
       nil ->
         {:error, "Command timed out after #{timeout}ms"}

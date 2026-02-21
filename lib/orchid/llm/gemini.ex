@@ -222,6 +222,22 @@ defmodule Orchid.LLM.Gemini do
     end
   end
 
+  defp normalize_thinking_level(nil), do: nil
+  defp normalize_thinking_level(:low), do: "LOW"
+  defp normalize_thinking_level(:medium), do: "MEDIUM"
+  defp normalize_thinking_level(:high), do: "HIGH"
+
+  defp normalize_thinking_level(level) when is_binary(level) do
+    case String.downcase(level) do
+      "low" -> "LOW"
+      "medium" -> "MEDIUM"
+      "high" -> "HIGH"
+      _ -> nil
+    end
+  end
+
+  defp normalize_thinking_level(_), do: nil
+
   # Gemini doesn't accept "required" or empty properties in certain cases
   defp sanitize_params(params) when is_map(params) do
     params
