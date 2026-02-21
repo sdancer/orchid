@@ -65,9 +65,14 @@ defmodule Orchid.Projects do
         else
           case Orchid.Sandbox.reset(project_id) do
             {:ok, _} ->
-              {:ok, :reset}
+              if Orchid.Sandbox.healthy?(project_id) do
+                {:ok, :reset}
+              else
+                Orchid.Sandbox.stop(project_id)
+                start_sandbox(project_id)
+              end
 
-            {:error, _reason} ->
+            _ ->
               Orchid.Sandbox.stop(project_id)
               start_sandbox(project_id)
           end

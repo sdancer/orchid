@@ -79,11 +79,18 @@ defmodule Orchid.Sandbox do
   def status(project_id) do
     case Registry.lookup(Orchid.Registry, {:sandbox, project_id}) do
       [{_pid, method}] ->
+        running = container_running?(container_name(project_id))
+
         %{
-          status: if(method, do: :ready, else: :starting),
+          status:
+            cond do
+              is_nil(method) -> :starting
+              running -> :ready
+              true -> :error
+            end,
           container_name: container_name(project_id),
           overlay_method: method,
-          running: container_running?(container_name(project_id))
+          running: running
         }
 
       [] ->

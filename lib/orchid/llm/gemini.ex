@@ -63,7 +63,7 @@ defmodule Orchid.LLM.Gemini do
         {:cont, {req, resp}}
       end
 
-      case Req.post(url, json: body, headers: headers(api_key), receive_timeout: 300_000, into: stream_fun) do
+      case Req.post(url, json: body, headers: headers(api_key), receive_timeout: 120_000, into: stream_fun) do
         {:ok, %{status: 200}} ->
           final = Process.get(:gemini_acc, acc)
           Process.delete(:gemini_acc)
