@@ -57,13 +57,21 @@ defmodule Orchid.Projects do
   def ensure_sandbox(project_id) do
     case Orchid.Sandbox.status(project_id) do
       nil ->
-        DynamicSupervisor.start_child(
-          Orchid.AgentSupervisor,
-          {Orchid.Sandbox, project_id}
-        )
+        start_sandbox(project_id)
 
       _status ->
-        {:ok, :already_running}
+        if Orchid.Sandbox.healthy?(project_id) do
+          {:ok, :already_running}
+        else
+          case Orchid.Sandbox.reset(project_id) do
+            {:ok, _} ->
+              {:ok, :reset}
+
+            {:error, _reason} ->
+              Orchid.Sandbox.stop(project_id)
+              start_sandbox(project_id)
+          end
+        end
     end
   end
 
@@ -87,6 +95,17 @@ defmodule Orchid.Projects do
         _ ->
           :ok
       end
+    end
+  end
+
+  defp start_sandbox(project_id) do
+    case DynamicSupervisor.start_child(
+           Orchid.AgentSupervisor,
+           {Orchid.Sandbox, project_id}
+         ) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> {:ok, pid}
+      other -> other
     end
   end
 end

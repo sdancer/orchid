@@ -23,7 +23,7 @@ defmodule Orchid.Agent.NodeServer.State do
     completed_tasks: [],
     status: :init,
     depth: 0,
-    max_depth: 4,
+    max_depth: 10,
     phase_token: 0,
     verifier_retry_count: 0,
     planner_retry_count: 0

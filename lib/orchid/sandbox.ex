@@ -82,9 +82,22 @@ defmodule Orchid.Sandbox do
         %{
           status: if(method, do: :ready, else: :starting),
           container_name: container_name(project_id),
-          overlay_method: method
+          overlay_method: method,
+          running: container_running?(container_name(project_id))
         }
-      [] -> nil
+
+      [] ->
+        nil
+    end
+  end
+
+  def healthy?(project_id) do
+    case Registry.lookup(Orchid.Registry, {:sandbox, project_id}) do
+      [{_pid, method}] when not is_nil(method) ->
+        container_running?(container_name(project_id))
+
+      _ ->
+        false
     end
   end
 
@@ -99,11 +112,16 @@ defmodule Orchid.Sandbox do
 
   def read_file(project_id, path) do
     case overlay_method(project_id) do
-      nil -> {:error, :sandbox_not_found}
-      :overlay -> podman_exec(container_name(project_id), "cat #{escape(path)}")
+      nil ->
+        {:error, :sandbox_not_found}
+
+      :overlay ->
+        podman_exec(container_name(project_id), "cat #{escape(path)}")
+
       :union ->
         p = paths(project_id)
         rel = workspace_relative(path)
+
         case Overlay.union_read(rel, p.upper, p.lower) do
           {:ok, content} -> {:ok, content}
           {:error, reason} -> {:error, "Failed to read #{path}: #{reason}"}
@@ -113,12 +131,20 @@ defmodule Orchid.Sandbox do
 
   def write_file(project_id, path, content) do
     case overlay_method(project_id) do
-      nil -> {:error, :sandbox_not_found}
+      nil ->
+        {:error, :sandbox_not_found}
+
       :overlay ->
-        podman_exec_stdin(container_name(project_id), "mkdir -p $(dirname #{escape(path)}) && cat > #{escape(path)}", content)
+        podman_exec_stdin(
+          container_name(project_id),
+          "mkdir -p $(dirname #{escape(path)}) && cat > #{escape(path)}",
+          content
+        )
+
       :union ->
         p = paths(project_id)
         rel = workspace_relative(path)
+
         case Overlay.union_write(rel, content, p.upper) do
           :ok -> {:ok, "Written to #{path}"}
           {:error, reason} -> {:error, "Failed to write #{path}: #{reason}"}
@@ -149,8 +175,12 @@ defmodule Orchid.Sandbox do
 
   def list_files(project_id, path \\ "/workspace") do
     case overlay_method(project_id) do
-      nil -> {:error, :sandbox_not_found}
-      :overlay -> podman_exec(container_name(project_id), "ls -la #{escape(path)}")
+      nil ->
+        {:error, :sandbox_not_found}
+
+      :overlay ->
+        podman_exec(container_name(project_id), "ls -la #{escape(path)}")
+
       :union ->
         p = paths(project_id)
         rel = workspace_relative(path)
@@ -160,12 +190,15 @@ defmodule Orchid.Sandbox do
 
   def grep_files(project_id, pattern, path \\ "/workspace", opts \\ []) do
     case overlay_method(project_id) do
-      nil -> {:error, :sandbox_not_found}
+      nil ->
+        {:error, :sandbox_not_found}
+
       :overlay ->
         glob = opts[:glob]
         cmd = "rg -n --no-heading #{escape(pattern)} #{escape(path)}"
         cmd = if glob, do: cmd <> " --glob #{escape(glob)}", else: cmd
         podman_exec(container_name(project_id), cmd)
+
       :union ->
         p = paths(project_id)
         rel = workspace_relative(path)
@@ -201,7 +234,10 @@ defmodule Orchid.Sandbox do
 
     state = start_container(state)
     # Store overlay_method in Registry value so data ops can read it without GenServer
-    Registry.update_value(Orchid.Registry, {:sandbox, project_id}, fn _ -> state.overlay_method end)
+    Registry.update_value(Orchid.Registry, {:sandbox, project_id}, fn _ ->
+      state.overlay_method
+    end)
+
     {:ok, state}
   end
 
@@ -209,7 +245,11 @@ defmodule Orchid.Sandbox do
   def handle_call(:reset, _from, state) do
     destroy_container(state)
     new_state = start_container(%{state | status: :starting, image: get_image()})
-    Registry.update_value(Orchid.Registry, {:sandbox, state.project_id}, fn _ -> new_state.overlay_method end)
+
+    Registry.update_value(Orchid.Registry, {:sandbox, state.project_id}, fn _ ->
+      new_state.overlay_method
+    end)
+
     {:reply, {:ok, %{status: new_state.status}}, new_state}
   end
 
@@ -231,20 +271,33 @@ defmodule Orchid.Sandbox do
 
     claude_path =
       case File.read_link(Path.join([home, ".local", "bin", "claude"])) do
-        {:ok, target} -> target
+        {:ok, target} ->
+          target
+
         _ ->
           case File.ls(claude_bin) do
             {:ok, versions} ->
               versions |> Enum.sort(:desc) |> List.first() |> then(&Path.join(claude_bin, &1))
-            _ -> nil
+
+            _ ->
+              nil
           end
       end
 
     claude_dir = Path.join([home, ".claude"])
 
     mounts = []
-    mounts = if claude_path && File.exists?(claude_path), do: mounts ++ ["-v", "#{claude_path}:/usr/local/bin/claude:ro"], else: mounts
-    mounts = if File.dir?(claude_dir), do: mounts ++ ["-v", "#{claude_dir}:/tmp/.claude-host:ro"], else: mounts
+
+    mounts =
+      if claude_path && File.exists?(claude_path),
+        do: mounts ++ ["-v", "#{claude_path}:/usr/local/bin/claude:ro"],
+        else: mounts
+
+    mounts =
+      if File.dir?(claude_dir),
+        do: mounts ++ ["-v", "#{claude_dir}:/tmp/.claude-host:ro"],
+        else: mounts
+
     mounts
   end
 
@@ -255,12 +308,17 @@ defmodule Orchid.Sandbox do
     codex_pkg_path = codex_package_path(codex_bin_path)
 
     mounts = []
+
     mounts =
       if codex_pkg_path && File.dir?(codex_pkg_path),
         do: mounts ++ ["-v", "#{codex_pkg_path}:/usr/local/lib/node_modules/@openai/codex:ro"],
         else: mounts
 
-    mounts = if File.dir?(codex_home), do: mounts ++ ["-v", "#{codex_home}:/tmp/.codex-host:ro"], else: mounts
+    mounts =
+      if File.dir?(codex_home),
+        do: mounts ++ ["-v", "#{codex_home}:/tmp/.codex-host:ro"],
+        else: mounts
+
     mounts
   end
 
@@ -275,7 +333,9 @@ defmodule Orchid.Sandbox do
         |> Path.dirname()
 
       _ ->
-        case System.cmd("sh", ["-c", "readlink -f #{escape(codex_bin_path)}"], stderr_to_stdout: true) do
+        case System.cmd("sh", ["-c", "readlink -f #{escape(codex_bin_path)}"],
+               stderr_to_stdout: true
+             ) do
           {resolved, 0} ->
             resolved
             |> String.trim()
@@ -293,18 +353,27 @@ defmodule Orchid.Sandbox do
     # cross-device-link write failures for normal mkdir/touch operations.
     case try_fallback_container(state) do
       {:ok, new_state} ->
-        Logger.info("Sandbox project-#{state.project_id}: fallback container started (union mode)")
+        Logger.info(
+          "Sandbox project-#{state.project_id}: fallback container started (union mode)"
+        )
+
         new_state
 
       {:error, reason} ->
-        Logger.warning("Sandbox project-#{state.project_id}: fallback failed (#{reason}), trying overlay")
+        Logger.warning(
+          "Sandbox project-#{state.project_id}: fallback failed (#{reason}), trying overlay"
+        )
+
         case try_overlay_container(state) do
           {:ok, new_state} ->
             Logger.info("Sandbox project-#{state.project_id}: overlay container started")
             new_state
 
           {:error, reason2} ->
-            Logger.error("Sandbox project-#{state.project_id}: all container methods failed: #{reason2}")
+            Logger.error(
+              "Sandbox project-#{state.project_id}: all container methods failed: #{reason2}"
+            )
+
             %{state | status: :error, overlay_method: :union}
         end
     end
@@ -367,29 +436,42 @@ defmodule Orchid.Sandbox do
   defp try_overlay_container(state) do
     System.cmd("podman", ["rm", "-f", state.container_name], stderr_to_stdout: true)
 
-    args = [
-      "run", "-d",
-      "--name", state.container_name,
-      "--cap-add=SYS_ADMIN",
-      "--device", "/dev/fuse",
-      "-v", "#{state.lower_path}:/workspace_lower:ro",
-      "-v", "#{state.upper_path}:/workspace_upper",
-      "-v", "#{state.work_path}:/workspace_work"
-    ] ++ dns_args() ++ claude_mounts() ++ codex_mounts() ++ [
-      state.image,
-      "sh", "-c",
-      "sudo mkdir -p /workspace && sudo fuse-overlayfs -o lowerdir=/workspace_lower,upperdir=/workspace_upper,workdir=/workspace_work /workspace && sudo chown agent:agent /workspace && " <>
-      "if [ -d /usr/local/lib/node_modules/@openai/codex ]; then sudo ln -sf /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex; fi && " <>
-      "if [ -d /tmp/.claude-host ]; then mkdir -p /home/agent/.claude && sudo cp /tmp/.claude-host/.credentials.json /tmp/.claude-host/settings.json /home/agent/.claude/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.claude; fi && " <>
-      "if [ -d /tmp/.codex-host ]; then mkdir -p /home/agent/.codex && sudo cp -r /tmp/.codex-host/* /home/agent/.codex/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.codex; fi && " <>
-      "exec sleep infinity"
-    ]
+    args =
+      [
+        "run",
+        "-d",
+        "--name",
+        state.container_name,
+        "--cap-add=SYS_ADMIN",
+        "--device",
+        "/dev/fuse",
+        "-v",
+        "#{state.lower_path}:/workspace_lower:ro",
+        "-v",
+        "#{state.upper_path}:/workspace_upper",
+        "-v",
+        "#{state.work_path}:/workspace_work"
+      ] ++
+        dns_args() ++
+        claude_mounts() ++
+        codex_mounts() ++
+        [
+          state.image,
+          "sh",
+          "-c",
+          "sudo mkdir -p /workspace && sudo fuse-overlayfs -o lowerdir=/workspace_lower,upperdir=/workspace_upper,workdir=/workspace_work /workspace && sudo chown agent:agent /workspace && " <>
+            "if [ -d /usr/local/lib/node_modules/@openai/codex ]; then sudo ln -sf /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex; fi && " <>
+            "if [ -d /tmp/.claude-host ]; then mkdir -p /home/agent/.claude && sudo cp /tmp/.claude-host/.credentials.json /tmp/.claude-host/settings.json /home/agent/.claude/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.claude; fi && " <>
+            "if [ -d /tmp/.codex-host ]; then mkdir -p /home/agent/.codex && sudo cp -r /tmp/.codex-host/* /home/agent/.codex/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.codex; fi && " <>
+            "exec sleep infinity"
+        ]
 
     case System.cmd("podman", args, stderr_to_stdout: true) do
       {_output, 0} ->
         case wait_for_container(state.container_name, 10) do
           :running ->
             {:ok, %{state | status: :ready, overlay_method: :overlay}}
+
           :exited ->
             System.cmd("podman", ["rm", "-f", state.container_name], stderr_to_stdout: true)
             {:error, "container exited (overlay mount likely failed)"}
@@ -403,26 +485,44 @@ defmodule Orchid.Sandbox do
   defp try_fallback_container(state) do
     System.cmd("podman", ["rm", "-f", state.container_name], stderr_to_stdout: true)
 
-    args = [
-      "run", "-d",
-      "--name", state.container_name,
-      "-v", "#{state.lower_path}:/workspace_lower:ro",
-      "-v", "#{state.upper_path}:/workspace:rw"
-    ] ++ dns_args() ++ claude_mounts() ++ codex_mounts() ++ [
-      state.image,
-      "sh", "-c",
-      "mkdir -p /workspace && sudo chown -R agent:agent /workspace && " <>
-      # Seed fallback workspace with lower-layer snapshot so workers can read project files.
-      "if [ -d /workspace_lower ]; then cp -a /workspace_lower/. /workspace/ 2>/dev/null || true; fi && " <>
-      "if [ -d /usr/local/lib/node_modules/@openai/codex ]; then sudo ln -sf /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex; fi && " <>
-      "if [ -d /tmp/.claude-host ]; then mkdir -p /home/agent/.claude && sudo cp /tmp/.claude-host/.credentials.json /tmp/.claude-host/settings.json /home/agent/.claude/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.claude; fi && " <>
-      "if [ -d /tmp/.codex-host ]; then mkdir -p /home/agent/.codex && sudo cp -r /tmp/.codex-host/* /home/agent/.codex/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.codex; fi && " <>
-      "exec sleep infinity"
-    ]
+    args =
+      [
+        "run",
+        "-d",
+        "--name",
+        state.container_name,
+        "-v",
+        "#{state.lower_path}:/workspace_lower:ro",
+        "-v",
+        "#{state.upper_path}:/workspace:rw"
+      ] ++
+        dns_args() ++
+        claude_mounts() ++
+        codex_mounts() ++
+        [
+          state.image,
+          "sh",
+          "-c",
+          # Seed fallback workspace with lower-layer snapshot so workers can read project files.
+          "mkdir -p /workspace && sudo chown -R agent:agent /workspace && " <>
+            "if [ -d /workspace_lower ]; then cp -a /workspace_lower/. /workspace/ 2>/dev/null || true; fi && " <>
+            "if [ -d /usr/local/lib/node_modules/@openai/codex ]; then sudo ln -sf /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex; fi && " <>
+            "if [ -d /tmp/.claude-host ]; then mkdir -p /home/agent/.claude && sudo cp /tmp/.claude-host/.credentials.json /tmp/.claude-host/settings.json /home/agent/.claude/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.claude; fi && " <>
+            "if [ -d /tmp/.codex-host ]; then mkdir -p /home/agent/.codex && sudo cp -r /tmp/.codex-host/* /home/agent/.codex/ 2>/dev/null; sudo chown -R agent:agent /home/agent/.codex; fi && " <>
+            "exec sleep infinity"
+        ]
 
     case System.cmd("podman", args, stderr_to_stdout: true) do
       {_output, 0} ->
-        {:ok, %{state | status: :ready, overlay_method: :union}}
+        case wait_for_container(state.container_name, 10) do
+          :running ->
+            {:ok, %{state | status: :ready, overlay_method: :union}}
+
+          :exited ->
+            System.cmd("podman", ["rm", "-f", state.container_name], stderr_to_stdout: true)
+            {:error, "container exited (fallback mode startup failed)"}
+        end
+
       {output, _code} ->
         {:error, "podman fallback failed: #{String.trim(output)}"}
     end
@@ -450,16 +550,24 @@ defmodule Orchid.Sandbox do
   defp podman_exec(cname, command, timeout \\ 30_000) do
     task =
       Task.async(fn ->
-        System.cmd("podman", [
-          "exec", "-w", "/workspace",
-          cname,
-          "sh", "-c", command
-        ], stderr_to_stdout: true)
+        System.cmd(
+          "podman",
+          [
+            "exec",
+            "-w",
+            "/workspace",
+            cname,
+            "sh",
+            "-c",
+            command
+          ],
+          stderr_to_stdout: true
+        )
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task) do
       {:ok, {output, 0}} -> {:ok, output}
-      {:ok, {output, code}} -> {:ok, "Exit code #{code}:\n#{output}"}
+      {:ok, {output, code}} -> {:error, "Exit code #{code}:\n#{output}"}
       nil -> {:error, "Command timed out after #{timeout}ms"}
     end
   end
@@ -496,10 +604,15 @@ defmodule Orchid.Sandbox do
         {:ok, acc}
 
       {^port, {:exit_status, code}} ->
-        {:ok, "Exit code #{code}:\n#{acc}"}
+        {:error, "Exit code #{code}:\n#{acc}"}
     after
       300_000 ->
-        try do Port.close(port) catch _, _ -> :ok end
+        try do
+          Port.close(port)
+        catch
+          _, _ -> :ok
+        end
+
         {:error, "Timed out waiting for command"}
     end
   end
@@ -516,5 +629,14 @@ defmodule Orchid.Sandbox do
 
   defp escape(str) do
     "'" <> String.replace(str, "'", "'\\''") <> "'"
+  end
+
+  defp container_running?(container_name) when is_binary(container_name) do
+    case System.cmd("podman", ["inspect", "--format", "{{.State.Running}}", container_name],
+           stderr_to_stdout: true
+         ) do
+      {"true\n", 0} -> true
+      _ -> false
+    end
   end
 end

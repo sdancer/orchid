@@ -33,7 +33,7 @@ defmodule Orchid.Agent.NodeServer do
       parent_pid: Keyword.get(opts, :parent_pid),
       objective: Keyword.fetch!(opts, :objective),
       depth: Keyword.get(opts, :depth, 0),
-      max_depth: Keyword.get(opts, :max_depth, 4),
+      max_depth: Keyword.get(opts, :max_depth, 10),
       llm_config: Keyword.get(opts, :llm_config, %{}),
       tool_context: Keyword.get(opts, :tool_context, %{}),
       planner_module: Keyword.get(opts, :planner_module, Orchid.Agent.Planner),
@@ -136,6 +136,10 @@ defmodule Orchid.Agent.NodeServer do
 
   @impl true
   def handle_info({:retry_revise, critique}, state) do
+    Logger.info(
+      "[NodeServer #{state.id}] Revising plan from verifier critique: #{String.slice(to_string(critique), 0, 220)}"
+    )
+
     {:noreply, start_revise_async(state, critique)}
   end
 
@@ -251,13 +255,37 @@ defmodule Orchid.Agent.NodeServer do
   end
 
   defp execute_tool_task(task, state) do
-    case state.tools_module.execute(task, state.tool_context) do
-      {:ok, result} ->
-        send(self(), {:child_success, task_id(task), result})
-        {:noreply, state}
+    case ensure_sandbox_ready(state) do
+      {:ok, state} ->
+        Logger.info(
+          "[NodeServer #{state.id}] Executing tool task #{task_id(task)}: #{summarize_tool_task(task)}"
+        )
 
-      {:error, failure_reason, context} ->
-        send(self(), {:child_failed, task_id(task), failure_reason, context})
+        case state.tools_module.execute(task, state.tool_context) do
+          {:ok, result} ->
+            Logger.info(
+              "[NodeServer #{state.id}] Tool task #{task_id(task)} succeeded: #{summarize_result(result)}"
+            )
+
+            send(self(), {:child_success, task_id(task), result})
+            {:noreply, state}
+
+          {:error, failure_reason, context} ->
+            Logger.warning(
+              "[NodeServer #{state.id}] Tool task #{task_id(task)} failed: #{failure_reason} (#{inspect(context)})"
+            )
+
+            send(self(), {:child_failed, task_id(task), failure_reason, context})
+            {:noreply, state}
+        end
+
+      {:error, reason} ->
+        send(
+          self(),
+          {:child_failed, task_id(task), "Sandbox initialization failed",
+           %{reason: inspect(reason)}}
+        )
+
         {:noreply, state}
     end
   end
@@ -348,5 +376,75 @@ defmodule Orchid.Agent.NodeServer do
       |> Enum.join(", ")
 
     if ids == "", do: "", else: "[#{ids}]"
+  end
+
+  defp summarize_tool_task(task) when is_map(task) do
+    tool = task[:tool] || task["tool"] || "unknown"
+    args = task[:args] || task["args"] || %{}
+    "tool=#{tool} args=#{String.slice(inspect(args), 0, 220)}"
+  end
+
+  defp summarize_tool_task(_), do: "tool=unknown args=%{}"
+
+  defp summarize_result(result), do: String.slice(inspect(result), 0, 220)
+
+  defp ensure_sandbox_ready(state) do
+    case sandbox_project_id(state.tool_context) do
+      nil ->
+        {:ok, state}
+
+      project_id ->
+        case Orchid.Projects.ensure_sandbox(project_id) do
+          {:ok, _} ->
+            case ensure_sandbox_operational(project_id) do
+              :ok ->
+                sandbox_status = Orchid.Sandbox.status(project_id)
+                {:ok, put_in(state.tool_context[:agent_state][:sandbox], sandbox_status)}
+
+              {:error, reason} ->
+                Logger.error(
+                  "[NodeServer #{state.id}] Sandbox unhealthy for project #{project_id}: #{inspect(reason)}"
+                )
+
+                {:error, reason}
+            end
+
+          {:error, reason} ->
+            Logger.error(
+              "[NodeServer #{state.id}] Failed to ensure sandbox for project #{project_id}: #{inspect(reason)}"
+            )
+
+            {:error, reason}
+        end
+    end
+  end
+
+  defp sandbox_project_id(%{agent_state: %{project_id: project_id, sandbox: sandbox}})
+       when is_binary(project_id) and sandbox != false,
+       do: project_id
+
+  defp sandbox_project_id(_), do: nil
+
+  defp ensure_sandbox_operational(project_id) when is_binary(project_id) do
+    case Orchid.Sandbox.exec(project_id, "true", timeout: 5_000) do
+      {:ok, _} ->
+        :ok
+
+      {:error, first_reason} ->
+        Logger.warning(
+          "[NodeServer] Sandbox health check failed for project #{project_id}; attempting reset: #{inspect(first_reason)}"
+        )
+
+        case Orchid.Sandbox.reset(project_id) do
+          {:ok, _} ->
+            case Orchid.Sandbox.exec(project_id, "true", timeout: 5_000) do
+              {:ok, _} -> :ok
+              {:error, second_reason} -> {:error, {:unhealthy_after_reset, second_reason}}
+            end
+
+          {:error, reset_reason} ->
+            {:error, {:reset_failed, reset_reason, first_reason}}
+        end
+    end
   end
 end
