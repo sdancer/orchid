@@ -56,7 +56,7 @@ graph TD
  C --> D[DynamicSupervisor + Registry]
  D --> E[Agent GenServer]
  E --> F[Sandbox GenServer]
- F --> G[Podman Container\n(overlayfs isolation)]
+ F --> G["Podman Container<br/>(overlayfs isolation)"]
  E --> H[CubDB Persistence]
  E --> I[LLM Provider Adapter]
 
