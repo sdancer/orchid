@@ -187,6 +187,7 @@ defmodule Orchid.LLM.Gemini do
       %{
         maxOutputTokens: Map.get(config, :max_tokens, 65536)
       }
+      |> maybe_put_response_mime_type(config)
       |> maybe_put_thinking_config(config)
 
     body = %{
@@ -231,6 +232,16 @@ defmodule Orchid.LLM.Gemini do
 
       level ->
         Map.put(generation_config, :thinkingConfig, %{thinkingLevel: level})
+    end
+  end
+
+  defp maybe_put_response_mime_type(generation_config, config) do
+    case config[:response_mime_type] do
+      mime when is_binary(mime) and mime != "" ->
+        Map.put(generation_config, :responseMimeType, mime)
+
+      _ ->
+        generation_config
     end
   end
 
