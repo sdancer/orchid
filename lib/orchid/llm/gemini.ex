@@ -153,11 +153,16 @@ defmodule Orchid.LLM.Gemini do
   defp build_request_body(config, context) do
     contents = format_messages(context.messages)
 
-    body = %{
-      contents: contents,
-      generationConfig: %{
+    generation_config =
+      %{
         maxOutputTokens: Map.get(config, :max_tokens, 65536)
       }
+      |> maybe_put_response_mime_type(config)
+      |> maybe_put_thinking_config(config)
+
+    body = %{
+      contents: contents,
+      generationConfig: generation_config
     }
 
     # Add system instruction
@@ -182,6 +187,36 @@ defmodule Orchid.LLM.Gemini do
       body
       |> Map.put(:tools, [%{function_declarations: gemini_tools}])
       |> Map.put(:tool_config, %{function_calling_config: %{mode: "AUTO"}})
+    else
+      body
+    end
+    |> maybe_put_google_search_tool(config)
+  end
+
+  defp maybe_put_thinking_config(generation_config, config) do
+    case normalize_thinking_level(config[:thinking_level]) do
+      nil ->
+        generation_config
+
+      level ->
+        Map.put(generation_config, :thinkingConfig, %{thinkingLevel: level})
+    end
+  end
+
+  defp maybe_put_response_mime_type(generation_config, config) do
+    case config[:response_mime_type] do
+      mime when is_binary(mime) and mime != "" ->
+        Map.put(generation_config, :responseMimeType, mime)
+
+      _ ->
+        generation_config
+    end
+  end
+
+  defp maybe_put_google_search_tool(body, config) do
+    if config[:google_search] do
+      current_tools = Map.get(body, :tools, [])
+      Map.put(body, :tools, current_tools ++ [%{googleSearch: %{}}])
     else
       body
     end
