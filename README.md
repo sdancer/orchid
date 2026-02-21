@@ -35,3 +35,71 @@ mix deps.get
 cp .env.example .env # ← edit this file
 
 ./orchid start
+```
+
+Open <http://localhost:4000> — you're ready to create your first agent!
+
+### Requirements
+
+- Elixir 1.17+ & Erlang/OTP 26+
+- Podman (v4+, rootless mode strongly recommended)
+- An LLM provider (Ollama, OpenAI, Anthropic, Groq, etc.)
+
+> **Pro tip:** Rootless Podman + overlayfs gives the best security and performance.
+
+## 🏗 Architecture
+
+```mermaid
+graph TD
+ A[LiveView UI] --> B[Phoenix Router + Channels]
+ B --> C[Agent Controller]
+ C --> D[DynamicSupervisor + Registry]
+ D --> E[Agent GenServer]
+ E --> F[Sandbox GenServer]
+ F --> G[Podman Container\n(overlayfs isolation)]
+ E --> H[CubDB Persistence]
+ E --> I[LLM Provider Adapter]
+
+ style G fill:#e1f5fe,stroke:#0284c8
+```
+
+Built on battle-tested OTP patterns:
+
+- **DynamicSupervisor + Registry** for agent lifecycle
+- **CubDB** for lightweight embedded storage
+- **Bandit + Phoenix LiveView** for the web layer
+
+## 🔒 Security Model
+
+See [`SANDBOX.md`](SANDBOX.md) for full details.
+
+Every agent is isolated in its own container with:
+
+- Filesystem overlay isolation
+- Minimal privileges & resource limits (configurable)
+- Optional network restrictions
+- Graceful fallback to union-fs when full Podman isn't available
+
+## 📍 Status & Roadmap
+
+**Early Alpha** (57 commits, heavily assisted by Claude). Expect rapid evolution.
+
+Coming soon:
+
+- Docker Compose support
+- Built-in agent templates (Coder, Researcher, Critic, etc.)
+- Usage & cost tracking
+- Simple auth for the web UI
+- Hex package + full documentation
+
+## 🤝 Contributing
+
+We love contributions! See `CONTRIBUTING.md` (coming soon) and [`CLAUDE.md`](CLAUDE.md) for our development philosophy.
+
+## 📄 License
+
+[MIT License](LICENSE) — free to use, modify, and build upon for both personal and commercial projects.
+
+---
+
+Made with ❤️ and OTP for the Elixir and AI communities.
